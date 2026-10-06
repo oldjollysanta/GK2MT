@@ -1,0 +1,60 @@
+# Python / native build output
+__pycache__/
+*.py[cod]
+.venv/
+.build-venv/
+/dist/
+/build/
+**/bin/
+**/obj/
+*.spec
+!GK2MT.spec
+
+# Private test runs, backup snapshots, tooling and downloaded mods
+/artifacts/
+/.tools/
+/prepared-mods/
+/.test-data/
+/GK2MT/
+/nexus-profile/
+/nexus-downloads/
+/packages/
+/backups/
+
+# Compiled/game binaries and archives (publish source and build instructions)
+*.exe
+*.dll
+*.pdb
+*.zip
+*.rar
+*.7z
+
+# Local credentials, environment files and browser/SSH account data
+.env
+.env.*
+!.env.example
+*.bin
+*.pem
+*.key
+*.ppk
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+deck-known-hosts*
+nexus-key*
+deck-password*
+settings.json
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal
+Local State
+
+# Editor / test caches
+.pytest_cache/
+.ruff_cache/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
