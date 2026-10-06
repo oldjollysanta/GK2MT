@@ -493,6 +493,182 @@ def unsafe_paths(root):
     assert outside.read_text() == "original"
 
 
+def batch_file_choices(root):
+    lib, game = setup(root)
+    tokens = [lib.stage(archive(root, name, files))['token'] for name, files in (
+        ('First', {'BepInEx/plugins/First.dll': 'first', 'BepInEx/plugins/shared.json': 'first asset'}),
+        ('Second', {'BepInEx/plugins/Second.dll': 'second', 'BepInEx/Plugins/Shared.json': 'second asset'}))]
+    before = copy.deepcopy(lib.state)
+    plan = lib.plan_install(tokens)
+    assert lib.state == before and not lib.state_path.exists()
+    assert len(plan['conflicts']) == 1
+    conflict = plan['conflicts'][0]
+    assert conflict['requires_choice'] and not conflict['identical'] and not conflict['owners']
+    assert {c['value'] for c in conflict['choices']} == set(tokens)
+    rejects(lambda: lib.install_batch(tokens, {}, plan['digest']))
+    rejects(lambda: lib.install_batch(tokens, {conflict['path']: 'unknown'}, plan['digest']))
+    assert lib.state == before and not (game / 'BepInEx').exists()
+    with patch.object(lib, 'deploy', wraps=lib.deploy) as deploy:
+        result = lib.install_batch(tokens, {conflict['path']: tokens[1]}, plan['digest'])
+    assert deploy.call_count == 1 and result['installed'] == 2 and result['skipped'] == 0
+    first, second = lib.state['packages']
+    assert first['excluded_paths'] == ['BepInEx/plugins/shared.json']
+    assert 'BepInEx/plugins/shared.json' not in first['paths']
+    assert (game / 'BepInEx/Plugins/Shared.json').read_text() == 'second asset'
+    assert not lib.conflicts()
+    repeated = lib.plan_install(tokens)
+    assert all(p['status'] == 'already_installed' for p in repeated['packages'])
+    assert lib.install_batch(tokens, {}, repeated['digest'])['installed'] == 0
+
+
+def batch_same_bytes_and_repeat(root):
+    lib, game = setup(root)
+    old = import_mod(lib, root, 'Old', {'BepInEx/plugins/Old.dll': 'old',
+                                      'BepInEx/plugins/shared.json': 'shared asset'})
+    files = {'BepInEx/plugins/New.dll': 'new', 'BepInEx/plugins/shared.json': 'shared asset'}
+    tokens = [lib.stage(archive(root, name, files))['token'] for name in ('New', 'Repacked')]
+    plan = lib.plan_install(tokens)
+    assert [p['status'] for p in plan['packages']] == ['ready', 'already_selected']
+    assert len(plan['conflicts']) == 1 and plan['conflicts'][0]['identical']
+    assert not plan['conflicts'][0]['requires_choice']
+    shared = game / 'BepInEx/plugins/shared.json'
+    original_time = shared.stat().st_mtime_ns
+    result = lib.install_batch(tokens, {}, plan['digest'])
+    assert result['installed'] == 1 and result['skipped'] == 1
+    assert result['results'][1]['status'] == 'already_selected'
+    assert shared.stat().st_mtime_ns == original_time
+    assert lib.conflicts()[0]['identical']
+    lib.set_enabled(old['id'], False)
+    assert shared.read_text() == 'shared asset'
+    lib.set_enabled(tokens[0], False)
+    repeated = lib.plan_install([tokens[0]])
+    assert repeated['packages'][0]['status'] == 'already_installed'
+    result = lib.install_batch([tokens[0]], {}, repeated['digest'])
+    assert not lib.state['packages'][-1]['enabled'] and result['installed'] == 0
+
+
+def batch_disabled_retired_and_physical(root):
+    lib, game = setup(root)
+    old = import_mod(lib, root, 'Old', {'BepInEx/plugins/Old.dll': 'old',
+                                      'BepInEx/plugins/shared.json': 'old asset'})
+    lib.set_enabled(old['id'], False)
+    old['retired_paths'] = ['BepInEx/plugins/retired.json']
+    old['adopted_paths'] = ['BepInEx/plugins/adopted.json']
+    manager.save_json(lib.state_path, lib.state)
+    sibling = put(game, 'BepInEx/plugins/New.dll.gk2mt-disabled', 'external disabled copy')
+    token = lib.stage(archive(root, 'New', {'BepInEx/plugins/New.dll': 'new',
+        'BepInEx/plugins/shared.json': 'new asset', 'BepInEx/plugins/retired.json': 'retired',
+        'BepInEx/plugins/adopted.json': 'adopted'}))['token']
+    plan = lib.plan_install([token])
+    conflicts = {Path(c['path']).name: c for c in plan['conflicts']}
+    assert set(conflicts) == {'New.dll', 'shared.json', 'retired.json', 'adopted.json'}
+    owner = next(o for o in conflicts['shared.json']['owners'] if o['kind'] == 'package')
+    assert not owner['enabled'] and owner['hash'] and owner['ownership'] == ['paths']
+    assert any(o['kind'] == 'disabled_file' for o in conflicts['New.dll']['owners'])
+    assert any(o.get('ownership') == ['retired_paths'] for o in conflicts['retired.json']['owners'])
+    assert any(o.get('ownership') == ['adopted_paths'] for o in conflicts['adopted.json']['owners'])
+    decisions = {c['path']: token if c is conflicts['New.dll'] else 'keep_existing' for c in plan['conflicts']}
+    result = lib.install_batch([token], decisions, plan['digest'])
+    assert result['installed'] == 1 and sibling.read_text() == 'external disabled copy'
+    assert (game / 'BepInEx/plugins/New.dll').read_text() == 'new'
+    assert len(lib.state['packages'][-1]['excluded_paths']) == 3 and not old['enabled']
+
+
+def batch_keeps_existing_whole_mod(root):
+    lib, game = setup(root)
+    old = import_mod(lib, root, 'Old', {'BepInEx/plugins/Shared.dll': 'old'})
+    token = lib.stage(archive(root, 'New', {'BepInEx/plugins/Shared.dll': 'new',
+                                         'BepInEx/plugins/new-asset.json': 'new asset'}))['token']
+    plan = lib.plan_install([token]); conflict = plan['conflicts'][0]
+    state_before, bytes_before = copy.deepcopy(lib.state), lib.state_path.read_bytes()
+    result = lib.install_batch([token], {conflict['path']: 'keep_existing'}, plan['digest'])
+    assert result['installed'] == 0 and result['skipped'] == 1
+    assert result['results'][0]['status'] == 'kept_existing'
+    assert lib.state == state_before and lib.state_path.read_bytes() == bytes_before
+    assert (game / 'BepInEx/plugins/Shared.dll').read_text() == 'old'
+    assert not (game / 'BepInEx/plugins/new-asset.json').exists()
+    assert lib.state['packages'][0]['id'] == old['id']
+
+
+def batch_stale_guards(root):
+    for changed in ('disk', 'disabled_sibling', 'payload', 'metadata', 'owner_cache', 'owner_state', 'nexus_metadata'):
+        folder = root / changed
+        lib, game = setup(folder)
+        old = import_mod(lib, folder, 'Old', {'BepInEx/plugins/Old.dll': 'old',
+                                             'BepInEx/plugins/shared.json': 'old asset'})
+        token = lib.stage(archive(folder, 'New', {'BepInEx/plugins/New.dll': 'new',
+                                                'BepInEx/plugins/shared.json': 'new asset'}))['token']
+        metadata = {token: {'name': 'Named mod', 'nexus_mod_id': 42}}
+        plan = lib.plan_install([token], metadata)
+        choices = {c['path']: token for c in plan['conflicts']}
+        if changed == 'disk':
+            put(game, 'BepInEx/plugins/New.dll', 'appeared after review')
+        elif changed == 'disabled_sibling':
+            put(game, 'BepInEx/plugins/New.dll.gk2mt-disabled', 'disabled after review')
+        elif changed == 'payload':
+            put(lib.data / 'staging' / token / 'payload', 'BepInEx/plugins/New.dll', 'changed staged DLL')
+        elif changed == 'metadata':
+            path = lib.data / 'staging' / token / 'package.json'
+            package = manager.read_json(path, {}); package['name'] = 'Changed name'; manager.save_json(path, package)
+        elif changed == 'owner_cache':
+            put(Path(old['folder']), 'BepInEx/plugins/shared.json', 'changed cached owner')
+        elif changed == 'owner_state':
+            other = manager.Manager(lib.data, game); other.set_enabled(old['id'], False)
+        else:
+            metadata[token]['nexus_mod_id'] = 43
+        bytes_before = {p.relative_to(game): p.read_bytes() for p in game.rglob('*') if p.is_file()}
+        state_before = lib.state_path.read_bytes()
+        rejects(lambda: lib.install_batch([token], choices, plan['digest'], metadata))
+        assert {p.relative_to(game): p.read_bytes() for p in game.rglob('*') if p.is_file()} == bytes_before, changed
+        assert lib.state_path.read_bytes() == state_before, changed
+
+
+def batch_rollback_and_rules(root):
+    lib, game = setup(root)
+    a = import_mod(lib, root, 'Old A', {'BepInEx/plugins/OldA.dll': 'A', 'BepInEx/plugins/old-shared.json': 'A'})
+    b = import_mod(lib, root, 'Old B', {'BepInEx/plugins/OldB.dll': 'B', 'BepInEx/plugins/old-shared.json': 'B'})
+    lib.set_rules([{'before': b['id'], 'after': a['id']}])
+    tokens = [lib.stage(archive(root, name, {f'BepInEx/plugins/{name}.dll': name}))['token'] for name in ('First', 'Second')]
+    plan = lib.plan_install(tokens)
+    state_before, state_bytes = copy.deepcopy(lib.state), lib.state_path.read_bytes()
+    bytes_before = {p.relative_to(game): p.read_bytes() for p in game.rglob('*') if p.is_file()}
+    original = manager.copy_atomic
+    def fail_second(source, target):
+        if target.name == 'Second.dll':
+            raise OSError('simulated second-package write failure')
+        return original(source, target)
+    with patch('manager.copy_atomic', side_effect=fail_second):
+        rejects(lambda: lib.install_batch(tokens, {}, plan['digest']))
+    assert lib.state == state_before and lib.state_path.read_bytes() == state_bytes
+    assert {p.relative_to(game): p.read_bytes() for p in game.rglob('*') if p.is_file()} == bytes_before
+    result = lib.install_batch(tokens, {}, plan['digest'])
+    assert result['installed'] == 2 and lib.state['rules'] == state_before['rules']
+    assert (game / 'BepInEx/plugins/old-shared.json').read_text() == 'A'
+
+
+def batch_rejects_skipped_file_winner(root):
+    lib, game = setup(root)
+    tokens = [lib.stage(archive(root, name, files))['token'] for name, files in (
+        ('A', {'BepInEx/plugins/Shared.dll': 'A', 'BepInEx/plugins/shared.dat': 'A'}),
+        ('B', {'BepInEx/plugins/Shared.dll': 'B'}),
+        ('C', {'BepInEx/plugins/C.dll': 'C', 'BepInEx/plugins/shared.dat': 'C'}))]
+    plan = lib.plan_install(tokens)
+    decisions = {c['path']: tokens[1] if c['path'].endswith('Shared.dll') else tokens[0] for c in plan['conflicts']}
+    with patch.object(lib, 'deploy', wraps=lib.deploy) as deploy:
+        try:
+            lib.install_batch(tokens, decisions, plan['digest'])
+        except ValueError as error:
+            assert 'no DLL files left' in str(error) and 'another file copy' in str(error)
+        else:
+            raise AssertionError('Accepted a file winner from a skipped package')
+    assert not deploy.called and not lib.state['packages'] and not lib.state_path.exists()
+    assert not (game / 'BepInEx').exists()
+    decisions[next(c['path'] for c in plan['conflicts'] if c['path'].endswith('shared.dat'))] = tokens[2]
+    result = lib.install_batch(tokens, decisions, plan['digest'])
+    assert result['installed'] == 2 and result['results'][0]['status'] == 'kept_existing'
+    assert (game / 'BepInEx/plugins/shared.dat').read_text() == 'C'
+
+
 def main():
     failures = []
     checks = (conflicts_rules_originals, preserve_directory, patcher_layout, foundation_uses_setup, hardlinks_and_active_drift,
@@ -503,6 +679,9 @@ def main():
                update_rolls_back, update_rejects_ambiguous, update_external_rolls_back,
                update_preserves_plugin_settings, update_rejects_disabled_neighbor_and_reserved_layout,
                preserve_shared_settings_metadata_only, preserve_settings_keeps_never_installed_defaults)
+    checks += (batch_file_choices, batch_same_bytes_and_repeat, batch_disabled_retired_and_physical,
+               batch_keeps_existing_whole_mod, batch_stale_guards, batch_rollback_and_rules,
+               batch_rejects_skipped_file_winner)
     with patch("manager.ensure_game_stopped"):
         for check in checks:
             with TemporaryDirectory() as temporary:

@@ -487,9 +487,10 @@ def cached_update_actions():
             archive = root / 'Example.zip'
             with zipfile.ZipFile(archive, 'w') as zipped:
                 zipped.writestr('Example.dll', b'new Example')
-            staged = app.dispatch('stage', {'path': str(archive)})
-            app.dispatch('install', {'token': staged['token'], 'metadata': {
-                'name': 'Example', 'version': '2.0', 'nexus_mod_id': 10, 'file_id': 110}})
+            metadata = {'name': 'Example', 'version': '2.0', 'nexus_mod_id': 10, 'file_id': 110}
+            staged = app.dispatch('stage', {'path': str(archive), 'metadata': metadata})
+            app.dispatch('install', {'token': staged['token'], 'metadata': metadata,
+                                    'choices': {path: staged['token'] for path in staged['conflicts']}})
             check.reset_mock()
             # A former external row disappears when its files become package-owned.
             state = app.snapshot()
@@ -668,9 +669,10 @@ def discovery_actions():
         archive = root / 'QueueCount.zip'
         with zipfile.ZipFile(archive, 'w') as zipped:
             zipped.writestr('QueueCount.dll', b'GK2MT tracked QueueCount')
-        staged = app.dispatch('stage', {'path': str(archive)})
-        app.dispatch('install', {'token': staged['token'], 'metadata': {
-            'name': 'Queue Count', 'version': '0.5.0', 'nexus_mod_id': 74, 'file_id': 555}})
+        metadata = {'name': 'Queue Count', 'version': '0.5.0', 'nexus_mod_id': 74, 'file_id': 555}
+        staged = app.dispatch('stage', {'path': str(archive), 'metadata': metadata})
+        app.dispatch('install', {'token': staged['token'], 'metadata': metadata,
+                                'choices': {path: staged['token'] for path in staged['conflicts']}})
         row = app.row_by_id(staged['token'])
         assert row['source'] == 'GK2MT' and row['file_id'] == 555
         assert app.integrations.installed_version(row) == '0.5.0'

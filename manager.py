@@ -213,6 +213,174 @@ class Manager:
             raise
         return package
 
+    def _install_packages(self, tokens, metadata=None):
+        if not isinstance(tokens, (list, tuple)) or any(
+                not isinstance(token, str) or not re.fullmatch('[a-f0-9]{32}', token) for token in tokens):
+            raise ValueError('Choose valid staged ZIP packages.')
+        packages = []
+        for token in dict.fromkeys(tokens):
+            folder = safe_path(self.data, 'staging/' + token)
+            package = read_json(safe_path(folder, 'package.json'), None)
+            if not package or package.get('id') != token or not isinstance(package.get('paths'), list):
+                raise ValueError('A staged package is missing. Choose its ZIP again.')
+            if Path(package.get('folder', '')).resolve() != safe_path(folder, 'payload').resolve():
+                raise ValueError('The staged payload location changed. Choose its ZIP again.')
+            if any(not isinstance(p, str) or p.casefold().endswith('.gk2mt-disabled') for p in package['paths']):
+                raise ValueError('The staged package has invalid destination paths.')
+            if len({p.casefold() for p in package['paths']}) != len(package['paths']):
+                raise ValueError('The staged package repeats a destination path.')
+            package = copy.deepcopy(package)
+            package['payload_sha256'] = self.payload_fingerprint(package)
+            for key in ('name', 'version', 'category', 'nexus_mod_id', 'file_id'):
+                value = (metadata or {}).get(token, {}).get(key)
+                if value is not None:
+                    package[key] = value
+            packages.append(package)
+        return packages
+
+    def plan_install(self, tokens, metadata=None):
+        """Compare an entire ZIP selection without changing packages or game files."""
+        persisted = read_json(self.state_path, {'packages': [], 'rules': [], 'deployed': {}, 'baseline': {}})
+        if persisted != self.state:
+            raise ValueError('The package library changed. Refresh and review the ZIPs again.')
+        incoming = self._install_packages(tokens, metadata)
+        summaries, paths, seen, installed_hashes = [], {}, {}, {}
+        for package in incoming:
+            existing = self.identical_package(package)
+            earlier = seen.get(package['payload_sha256'])
+            status = 'already_installed' if existing else 'already_selected' if earlier else 'ready'
+            summary = {'token': package['id'], 'name': package['name'], 'version': package.get('version', 'Unknown'),
+                       'files': len(package['paths']), 'status': status, 'existing': None}
+            if existing or earlier:
+                known = existing or earlier
+                summary['existing'] = {key: known[key] for key in ('id', 'name', 'enabled')}
+            else:
+                seen[package['payload_sha256']] = package
+                for relative in package['paths']:
+                    source = safe_path(Path(package['folder']), relative)
+                    item = paths.setdefault(relative.casefold(), {'path': relative, 'incoming': [], 'owners': []})
+                    item['incoming'].append({'token': package['id'], 'name': package['name'], 'hash': digest(source)})
+            summaries.append(summary)
+        for package in self.state['packages']:
+            owned = {}
+            for field in ('paths', 'adopted_paths', 'retired_paths'):
+                for relative in package.get(field, []):
+                    active = relative.removesuffix('.gk2mt-disabled')
+                    key = active.casefold()
+                    if key not in paths:
+                        continue
+                    owner = owned.setdefault(key, {'id': package['id'], 'name': package['name'],
+                        'enabled': bool(package['enabled']), 'kind': 'package', 'hash': None, 'ownership': []})
+                    owner['ownership'].append(field)
+                    source = safe_path(Path(package['folder']), relative)
+                    if source.is_file():
+                        owner['hash'] = digest(source)
+            for key, owner in owned.items():
+                paths[key]['owners'].append(owner)
+                installed_hashes.setdefault(package['id'], {})[key] = owner['hash']
+        disk, conflicts = {}, []
+        for key, item in sorted(paths.items()):
+            disk[key] = []
+            for suffix in ('', '.gk2mt-disabled'):
+                relative = item['path'] + suffix
+                target = safe_path(self.game, relative)
+                for parent in target.parents:
+                    if parent == self.game.resolve():
+                        break
+                    if parent.exists() and not parent.is_dir():
+                        raise ValueError('A destination folder is a file: ' + relative)
+                record = {'path': relative, 'exists': target.exists(),
+                          'hash': digest(target) if target.is_file() else None,
+                          'directory': target.is_dir()}
+                disk[key].append(record)
+                if record['exists']:
+                    item['owners'].append({'id': 'file:' + relative.casefold(),
+                        'name': 'Existing disabled file' if suffix else 'Existing file', 'path': relative,
+                        'enabled': not bool(suffix), 'kind': 'disabled_file' if suffix else 'file',
+                        'hash': record['hash'], 'directory': record['directory']})
+            if not item['owners'] and len(item['incoming']) < 2:
+                continue
+            hashes = {entry['hash'] for entry in item['owners'] + item['incoming']}
+            identical = None not in hashes and len(hashes) == 1
+            choices = ([{'value': 'keep_existing', 'label': 'Keep existing file'}] if item['owners'] else [])
+            if not any(record['directory'] for record in disk[key]):
+                choices += [{'value': entry['token'], 'label': 'Use ' + entry['name']} for entry in item['incoming']]
+            conflicts.append(item | {'identical': identical, 'requires_choice': not identical,
+                                    'config': _settings_path(item['path']), 'choices': choices,
+                                    'default_choice': 'share_identical' if identical else None})
+        snapshot = {'game': str(self.game.resolve()), 'state': self.state, 'incoming': incoming,
+                    'staged_metadata_hashes': {package['id']: digest(safe_path(self.data,
+                        'staging/' + package['id'] + '/package.json')) for package in incoming},
+                    'installed_hashes': installed_hashes, 'disk': disk,
+                    'packages': summaries, 'conflicts': conflicts}
+        plan_digest = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
+        return {'packages': summaries, 'conflicts': conflicts, 'digest': plan_digest}
+
+    def install_batch(self, tokens, choices, expected_digest, metadata=None):
+        """Apply a reviewed selection in one reversible deployment."""
+        plan = self.plan_install(tokens, metadata)
+        if not isinstance(expected_digest, str) or expected_digest != plan['digest']:
+            raise ValueError('Files or package settings changed. Review the ZIP installation again; no files changed.')
+        if not isinstance(choices, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+                                              for key, value in choices.items()):
+            raise ValueError('Choose a file resolution for each conflicting path.')
+        decisions = {key.casefold(): value for key, value in choices.items()}
+        if len(decisions) != len(choices) or set(decisions) - {c['path'].casefold() for c in plan['conflicts']}:
+            raise ValueError('A file choice does not match this installation plan.')
+        excluded = {package['token']: set() for package in plan['packages']}
+        for conflict in plan['conflicts']:
+            key = conflict['path'].casefold()
+            selected = decisions.get(key)
+            if selected is None and not conflict['requires_choice']:
+                continue  # Same bytes can retain shared ownership, so disabling one package keeps the other's asset.
+            if selected not in [choice['value'] for choice in conflict['choices']]:
+                raise ValueError('Choose which file to keep for ' + conflict['path'] + '.')
+            for entry in conflict['incoming']:
+                if entry['token'] != selected:
+                    excluded[entry['token']].add(key)
+        incoming = {package['id']: package for package in self._install_packages(tokens, metadata)}
+        results, prepared = [], []
+        for summary in plan['packages']:
+            token = summary['token']
+            result = {key: summary[key] for key in ('token', 'name', 'status')}
+            if summary['status'] != 'ready':
+                result.update(id=summary['existing']['id'], files=0,
+                              reason='Already installed; its enabled state is kept.' if summary['status'] == 'already_installed'
+                              else 'The same mod payload is already selected in this batch.')
+            else:
+                package = incoming[token]
+                omitted = [path for path in package['paths'] if path.casefold() in excluded[token]]
+                package['paths'] = [path for path in package['paths'] if path.casefold() not in excluded[token]]
+                if not any(path.casefold().endswith('.dll') for path in package['paths']):
+                    result.update(status='kept_existing', files=0, excluded_paths=omitted,
+                                  reason='Kept the existing DLL files; this ZIP was skipped rather than installing an incomplete mod.')
+                else:
+                    package['excluded_paths'] = omitted
+                    package['payload_sha256'] = self.payload_fingerprint(package)
+                    prepared.append(package)
+                    result.update(id=token, status='installed', files=len(package['paths']), excluded_paths=omitted)
+            results.append(result)
+        prepared_ids = {package['id'] for package in prepared}
+        for conflict in plan['conflicts']:
+            selected = decisions.get(conflict['path'].casefold())
+            if selected and selected != 'keep_existing' and selected not in prepared_ids:
+                name = next(item['name'] for item in conflict['incoming'] if item['token'] == selected)
+                raise ValueError('The chosen file ' + conflict['path'] + ' belongs to ' + name
+                                 + ', which has no DLL files left to install. Choose that ZIP\'s DLL or another file copy; no files changed.')
+        # Check every decision and selected payload before changing the package list.
+        if self.plan_install(tokens, metadata)['digest'] != expected_digest:
+            raise ValueError('Files or package settings changed. Review the ZIP installation again; no files changed.')
+        previous = copy.deepcopy(self.state)
+        try:
+            self.state['packages'].extend(prepared)
+            if prepared:
+                self.deploy()
+        except BaseException:
+            self.state = previous
+            raise
+        return {'results': results, 'installed': len(prepared), 'skipped': len(results) - len(prepared),
+                'files': sum(result['files'] for result in results)}
+
     def update(self, token, row, metadata=None, dry_run=False):
         """Replace one release, retaining its identity and backing up adopted files."""
         if not re.fullmatch('[a-f0-9]{32}', token):
@@ -581,7 +749,20 @@ class Manager:
             if package['enabled']:
                 for p in package['paths']:
                     paths.setdefault(p.casefold(), []).append(package['id'])
-        return [{'path': p, 'packages': owners, 'winner': owners[-1]} for p, owners in paths.items() if len(owners) > 1]
+        result = []
+        by_id = {package['id']: package for package in self.state['packages']}
+        for path, owners in paths.items():
+            if len(owners) < 2:
+                continue
+            hashes = []
+            for identifier in owners:
+                package = by_id[identifier]
+                relative = next(p for p in package['paths'] if p.casefold() == path)
+                source = safe_path(Path(package['folder']), relative)
+                hashes.append(digest(source) if source.is_file() else None)
+            result.append({'path': path, 'packages': owners, 'winner': owners[-1],
+                           'identical': None not in hashes and len(set(hashes)) == 1})
+        return result
 
     def deploy(self):
         ensure_game_stopped()

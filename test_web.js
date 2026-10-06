@@ -116,6 +116,7 @@ function modSourceChecks() {
     $('search').value='';
   }
   run('renderRules()');
+  assert.match($('conflicts-list').innerHTML,/Installed file overlaps only\. Mods can still conflict when the game runs\./,'zero file overlaps does not imply runtime compatibility');
   assert.match($('rule-first').innerHTML,/value="imported-nexus"/);
   assert.match($('rule-first').innerHTML,/value="imported-manual"/);
   assert.doesNotMatch($('rule-first').innerHTML,/value="vortex-nexus"|value="unlinked"|value="steam"/);
@@ -123,6 +124,27 @@ function modSourceChecks() {
   const filter=html.match(/<select id="source-filter"[^>]*>(.*?)<\/select>/)[1];
   assert.equal(filter,'<option value="">All sources</option><option>Steam</option><option>Nexus</option><option>Manual</option>');
   assert.match(html,/<th>Source<\/th>/);
+}
+
+function libraryConflictChecks(){
+  const inputs=new Map(),node=id=>{if(!inputs.has(id))inputs.set(id,{value:'',innerHTML:'',textContent:'',classList:{toggle(){}}});return inputs.get(id);};
+  const fixture={mods:[{id:'one',name:'First <mod>',source:'GK2MT',enabled:true},{id:'two',name:'Second <mod>',source:'GK2MT',enabled:true}],rules:[],settings:{},game_found:true,loader_installed:true,locations_confirmed:true,
+    conflicts:[{path:'BepInEx/plugins/different.dll',packages:['one','two'],winner:'two',identical:false},{path:'BepInEx/plugins/shared<asset>.json',packages:['one','two'],winner:'two',identical:true},{path:'BepInEx/plugins/unchecked.dll',packages:['one','two'],winner:'one'}]};
+  const ui=vm.createContext({$:node,state:fixture,renderWorkshopSetup(){},renderMods(){},renderDuplicates(){},renderUpdates(){},renderDeckConnection(){}});
+  const execute=script=>vm.runInContext(script,ui);
+  execute(source.slice(source.indexOf('const escapeHTML'),source.indexOf('function toast')));
+  execute(source.slice(source.indexOf('function render()'),source.indexOf('function renderWorkshopSetup')));
+  execute(source.slice(source.indexOf('function renderRules()'),source.indexOf('function updateReason')));
+  execute('render()');
+  assert.equal(node('conflict-count').textContent,2,'identical shared files do not increase the conflict metric; unchecked records remain conflicts');
+  const content=node('conflicts-list').innerHTML,shared=content.match(/<details class="import-shared">[\s\S]*?<\/details>/)[0];
+  assert.equal((content.match(/ wins<\/span>/g)||[]).length,2,'only differing or unchecked overlaps have winner rows');
+  assert.match(shared,/1 identical shared file · no file conflict/);assert.match(shared,/shared&lt;asset&gt;\.json/);assert.match(shared,/First &lt;mod&gt; · Second &lt;mod&gt;/);
+  assert.doesNotMatch(shared,/ wins|class="warning"|class="danger"|<details[^>]*\bopen\b/,'shared-file information is neutral and initially folded');
+  fixture.conflicts=[fixture.conflicts[1]];execute('render()');assert.equal(node('conflict-count').textContent,0);
+  assert.match(node('conflicts-list').innerHTML,/No differing file overlaps/);assert.doesNotMatch(node('conflicts-list').innerHTML,/ wins<\/span>/);
+  assert.match(node('conflicts-list').innerHTML,/Mods can still conflict when the game runs/,'a zero metric keeps the runtime compatibility limit visible');
+  fixture.conflicts=[];execute('render()');assert.equal(node('conflict-count').textContent,0);assert.doesNotMatch(node('conflicts-list').innerHTML,/class="import-shared"/,'no empty shared-file disclosure is shown');
 }
 
 async function workshopRefreshChecks() {
@@ -487,33 +509,110 @@ async function profileChecks() {
 }
 
 async function zipImportChecks(){
-  const inputs=new Map(),calls=[];let review,refreshed=0,profileRefreshes=0;
-  const node=id=>{if(!inputs.has(id))inputs.set(id,{checked:false,events:new Map(),addEventListener(event,handler){this.events.set(event,handler);},close(){}});return inputs.get(id);};
-  const normal={token:'zip-review',name:'Local <mod>',files:1,conflicts:[],validation:{message:'BepInEx DLL detected'}};
-  const ui=vm.createContext({$:node,state:{downloads:[]},fixture:[normal],toast(){},work:async(_,task)=>task(),refresh:async()=>{refreshed++;},refreshSelectedProfile:async()=>{profileRefreshes++;},
-    modal(...args){review=args;node('dialog-actions').lastElementChild={disabled:!!args[2].at(-1)?.[3]};},
-    api:async(action,body)=>{calls.push([action,JSON.parse(JSON.stringify(body))]);if(action==='stage')return normal;if(action==='install')return {status:'installed'};throw Error('Unexpected ZIP request: '+action);}});
+  const inputs=new Map(),calls=[],messages=[],focused=[];let review,refreshed=0,profileRefreshes=0;
+  const makeNode=()=>({checked:false,value:'',textContent:'',events:new Map(),addEventListener(event,handler){this.events.set(event,handler);},scrollIntoView(options){this.scrolled=options;},close(){}});
+  const node=id=>{if(!inputs.has(id))inputs.set(id,makeNode());return inputs.get(id);};
+  const normal={token:'zip-review',name:'Local <mod>',status:'ready',files:1,validation:{message:'BepInEx DLL detected'}};
+  const other={...normal,token:'second-zip',name:'Second <mod>'};
+  const ui=vm.createContext({$:node,state:{downloads:[]},fixture:[normal],plan:{packages:[normal],conflicts:[],digest:'plan-1'},toast:(...args)=>messages.push(args),focusAfterWork:element=>focused.push(element),work:async(_,task)=>task(),refresh:async()=>{refreshed++;},refreshSelectedProfile:async()=>{profileRefreshes++;},
+    modal(...args){review=args;for(const match of args[1].matchAll(/id="([^"]+)"/g))inputs.set(match[1],makeNode());node('dialog-actions').lastElementChild={disabled:!!args[2].at(-1)?.[3]};},
+    api:async(action,body)=>{
+      calls.push([action,JSON.parse(JSON.stringify(body))]);
+      if(action==='stage')return normal;
+      if(action==='install-preview'){if(ui.previewFailure)throw ui.previewFailure;return ui.plan;}
+      if(action==='install-batch'){
+        if(ui.installFailure)throw ui.installFailure;
+        return ui.batchResult || {results:ui.plan.packages.map(p=>({...p,status:p.status==='ready'?'installed':p.status}))};
+      }
+      throw Error('Unexpected ZIP request: '+action);
+    }});
   const execute=script=>vm.runInContext(script,ui);
+  const installCalls=()=>calls.filter(([action])=>action==='install-batch');
+  const changeChoice=(index,value)=>node('import-choice-'+index).events.get('change')({target:{value}});
   execute(source.slice(source.indexOf('const escapeHTML'),source.indexOf('function toast')));
   execute(source.slice(source.indexOf('async function stagePath'),source.indexOf('function compareView')));
-  execute('reviewPackages(fixture,[])');assert.equal(calls.length,0,'reviewing does not install anything');
-  review[2][0][1]();assert.equal(calls.length,0,'cancelling a review leaves files untouched');
-  execute('reviewPackages(fixture,[])');await review[2].at(-1)[1]();
-  assert.deepEqual(calls.at(-1),['install',{token:'zip-review',acknowledge_duplicates:false}]);
+  await execute('reviewPackages(fixture,[])');assert.deepEqual(calls.at(-1),['install-preview',{tokens:['zip-review']}]);
+  assert.equal(installCalls().length,0,'review only reads the current files');
+  assert.match(review[1],/Local &lt;mod&gt;/,'mod names are escaped in the review');
+  review[2][0][1]();assert.equal(installCalls().length,0,'cancelling a review leaves files untouched');
+  await execute('reviewPackages(fixture,[])');await review[2].at(-1)[1]();
+  assert.deepEqual(installCalls().at(-1),['install-batch',{tokens:['zip-review'],choices:{},digest:'plan-1',acknowledge_duplicates:false}]);
   assert.equal(refreshed,1);assert.equal(profileRefreshes,1,'confirmed installation rechecks profile progress');
-  ui.fixture=[{...normal,status:'already_installed'}];execute('reviewPackages(fixture,[])');
+  assert.equal(review[0],'ZIP installation complete');assert.match(review[1],/1 mod installed/);
+  assert.equal(focused.at(-1),node('dialog-title'),'completion returns focus to its heading');
+  ui.fixture=[{...normal,status:'already_installed'}];ui.plan={packages:ui.fixture,conflicts:[],digest:'skipped'};await execute('reviewPackages(fixture,[])');
   assert.match(review[1],/Already installed · skipped/);assert.ok(!review[2].some(([label])=>label.startsWith('Install')),'an identical archive cannot be installed again from review');
-  ui.fixture=[{...normal,requires_duplicate_ack:true,duplicates:[{name:'Steam <copy>',source:'Steam',enabled:true}]}];execute('reviewPackages(fixture,[])');
+  ui.fixture=[normal,{...other,status:'already_selected'}];ui.plan={packages:ui.fixture,conflicts:[],digest:'selection'};await execute('reviewPackages(fixture,[])');
+  assert.match(review[1],/Identical ZIP in this selection · skipped/,'different archives containing the same payload are counted separately but installed once');
+  assert.equal(review[2].at(-1)[0],'Install 1 mod');
+  ui.fixture=[{...normal,requires_duplicate_ack:true,duplicates:[{name:'Steam <copy>',source:'Steam',enabled:true}]}];ui.plan={packages:ui.fixture,conflicts:[],digest:'duplicates'};await execute('reviewPackages(fixture,[])');
   assert.match(review[1],/Steam &lt;copy&gt;/);assert.ok(review[2].at(-1)[3],'duplicate install requires a separate choice');
-  await assert.rejects(review[2].at(-1)[1](),/confirm before installing another/);
+  const beforeDuplicate=installCalls().length;
+  await assert.rejects(review[2].at(-1)[1](),/Confirm the duplicate copy/);assert.equal(installCalls().length,beforeDuplicate);
   node('import-duplicate-accept').checked=true;node('import-duplicate-accept').events.get('change')({target:{checked:true}});
   assert.equal(node('dialog-actions').lastElementChild.disabled,false);await review[2].at(-1)[1]();
-  assert.deepEqual(calls.at(-1),['install',{token:'zip-review',acknowledge_duplicates:true}]);
+  assert.deepEqual(installCalls().at(-1),['install-batch',{tokens:['zip-review'],choices:{},digest:'duplicates',acknowledge_duplicates:true}]);
+
+  const conflict={path:'BepInEx/plugins/shared.dll',requires_choice:true,identical:false,
+    owners:[{id:'active',name:'Installed <active>',enabled:true,kind:'package',hash:'old'},{id:'disabled',name:'Installed <disabled>',enabled:false,kind:'package',hash:'disabled'}],
+    incoming:[{token:normal.token,name:normal.name,hash:'new'},{token:other.token,name:other.name,hash:'different'}],
+    choices:[{value:'keep_existing',label:'Keep existing file'},{value:normal.token,label:'Use '+normal.name},{value:other.token,label:'Use '+other.name}]};
+  const secondConflict={...conflict,path:'BepInEx/config/shared.cfg'};
+  ui.fixture=[normal,other];ui.plan={packages:ui.fixture,conflicts:[conflict,secondConflict],digest:'conflict-plan'};
+  await execute('reviewPackages(fixture,[])');
+  assert.match(review[1],/Installed &lt;active&gt;<\/strong><span>enabled/);
+  assert.match(review[1],/Installed &lt;disabled&gt;<\/strong><span>disabled/);
+  assert.match(review[1],/Use Second &lt;mod&gt;/,'every incoming mod has a named choice');
+  assert.match(review[1],/Keeping a disabled copy does not enable it/);
+  assert.equal(node('dialog-actions').lastElementChild.disabled,true);
+  const beforeConflict=installCalls().length;await assert.rejects(review[2].at(-1)[1](),/Choose which file/);assert.equal(installCalls().length,beforeConflict);
+  changeChoice(0,'keep_existing');assert.equal(node('dialog-actions').lastElementChild.disabled,true,'every differing path requires a choice');
+  changeChoice(1,'not-a-reviewed-mod');assert.equal(node('dialog-actions').lastElementChild.disabled,true,'unreviewed choice values cannot unlock installation');
+  changeChoice(1,other.token);assert.equal(node('dialog-actions').lastElementChild.disabled,false);
+  ui.batchResult={results:[{...normal,status:'kept_existing',reason:'The existing DLL was kept.'},{...other,status:'installed',excluded_paths:['BepInEx/plugins/shared.dll']}]};
+  await review[2].at(-1)[1]();
+  assert.deepEqual(installCalls().at(-1),['install-batch',{tokens:['zip-review','second-zip'],choices:{'BepInEx/plugins/shared.dll':'keep_existing','BepInEx/config/shared.cfg':'second-zip'},digest:'conflict-plan',acknowledge_duplicates:false}]);
+  assert.match(review[1],/1 mod installed · 1 skipped/);assert.match(review[1],/The existing DLL was kept/);assert.match(review[1],/shared files kept from your selection/);
+  ui.batchResult=null;
+
+  ui.fixture=[{...normal,requires_duplicate_ack:true,duplicates:[{name:'Steam copy',source:'Steam',enabled:false}]}];ui.plan={packages:ui.fixture,conflicts:[conflict],digest:'both-gates'};
+  await execute('reviewPackages(fixture,[])');changeChoice(0,normal.token);
+  assert.equal(node('dialog-actions').lastElementChild.disabled,true,'file selection never bypasses the Steam duplicate acknowledgement');
+  node('import-duplicate-accept').checked=true;node('import-duplicate-accept').events.get('change')({target:node('import-duplicate-accept')});
+  assert.equal(node('dialog-actions').lastElementChild.disabled,false);
+  changeChoice(0,'');assert.equal(node('dialog-actions').lastElementChild.disabled,true,'acknowledgement never bypasses a missing file choice');
+
+  ui.fixture=[normal,other];ui.plan={packages:ui.fixture,conflicts:[{...conflict,requires_choice:false,identical:true}],digest:'same-bytes'};
+  await execute('reviewPackages(fixture,[])');assert.equal(node('dialog-actions').lastElementChild.disabled,false,'identical shared bytes need no decision');
+  assert.match(review[1],/identical bytes · no choice needed/);assert.doesNotMatch(review[1],/import-choice-|class="import-conflict"/);
+  assert.match(review[1],/can be shared\. Removing or disabling one mod keeps the file available to the other/,'identical files keep shared ownership rather than excluding a mod’s assets');
+  assert.doesNotMatch(review[1].match(/<details class="import-shared">[\s\S]*?<\/details>/)[0],/class="warning"|class="danger"/,'same-byte information is not a danger or overwrite warning');
+  await review[2].at(-1)[1]();assert.deepEqual(installCalls().at(-1)[1].choices,{},'same-byte paths use the backend automatic resolution');
+
+  ui.plan={packages:ui.fixture,conflicts:[conflict],digest:'old-plan'};await execute('reviewPackages(fixture,["Broken <archive>: no DLL"])');changeChoice(0,normal.token);
+  ui.installFailure=Error('The installed files changed. No files changed.');
+  const beforeFailure=messages.length;await review[2].at(-1)[1]();
+  assert.equal(review[0],'Review ZIP installation');assert.equal(messages.length,beforeFailure,'a rejected batch never reports success');
+  assert.match(node('import-review-error').textContent,/No files changed.*Review the ZIPs again/);assert.equal(node('import-review-error').hidden,false);
+  assert.equal(node('import-review-error').scrolled.block,'nearest','a rejected batch brings its recovery message into view');assert.equal(focused.at(-1),node('import-review-error'));
+  assert.equal(node('dialog-actions').lastElementChild.textContent,'Review again');assert.equal(node('dialog-actions').lastElementChild.disabled,false);
+  const beforeReviewAgain=installCalls().length;ui.installFailure=null;ui.plan={...ui.plan,digest:'fresh-plan'};await review[2].at(-1)[1]();
+  assert.equal(installCalls().length,beforeReviewAgain,'retry first gets a fresh preview instead of replaying a stale digest');
+  assert.equal(node('dialog-actions').lastElementChild.disabled,true,'fresh review requires a new explicit file choice');
+  assert.match(review[1],/Broken &lt;archive&gt;/,'preparation errors remain visible after re-review');changeChoice(0,other.token);await review[2].at(-1)[1]();
+  assert.equal(installCalls().at(-1)[1].digest,'fresh-plan');assert.match(review[1],/These ZIPs were not installed/);
+
+  ui.previewFailure=Error('The staged ZIP is missing.');await execute('reviewPackages(fixture,[])');assert.equal(review[0],'ZIP review needs attention');
+  assert.match(review[1],/ZIPs have not been installed/);ui.previewFailure=null;await review[2].at(-1)[1]();assert.equal(review[0],'Review ZIP installation');
+  ui.fixture=[normal];ui.plan={packages:ui.fixture,conflicts:[],digest:'staged'};
   const stages=calls.filter(([action])=>action==='stage').length;
   await execute('stagePaths(["C:/fixture/mod.zip","C:/fixture/mod.zip","C:/fixture/notes.txt"])');
   assert.equal(calls.filter(([action])=>action==='stage').length,stages+1,'repeated drop paths are staged once');
   assert.match(review[1],/Only ZIP files can be imported/);
   await assert.rejects(execute('stagePaths([])'),/Choose 1–100/);
+  const previews=calls.filter(([action])=>action==='install-preview').length;
+  await execute('stagePaths(["C:/fixture/notes.txt"])');assert.equal(calls.filter(([action])=>action==='install-preview').length,previews,'invalid files never generate a batch or reach installation');
+  assert.ok(!review[2].some(([label])=>label.startsWith('Install')));
 }
 
 async function workshopSetupChecks() {
@@ -676,6 +775,7 @@ async function uninstallChecks() {
 
 async function main() {
   modSourceChecks();
+  libraryConflictChecks();
   await workshopRefreshChecks();
   await desktopBridgeChecks();
   navigationChecks();

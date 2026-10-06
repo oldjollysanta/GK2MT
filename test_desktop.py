@@ -6,6 +6,7 @@ import socket
 import sys
 import tempfile
 import time
+import zipfile
 from unittest.mock import patch
 
 import app
@@ -52,6 +53,19 @@ def main():
             assert app.DATA == data and loader_target.read_bytes() == loader_source.read_bytes()
             setup_checkpoint.update(hash=app.manager.digest(loader_target), mtime=loader_target.stat().st_mtime_ns)
             return {}
+        if action == '__test_import_packages':
+            assert app.DATA == data and app.settings()['game'] == str(game)
+            shared.parent.mkdir(parents=True)
+            shared.write_bytes(b'Existing fixture asset')
+            packages = []
+            for name in ('Native A', 'Native B'):
+                zipped = folder / (name + '.zip')
+                with zipfile.ZipFile(zipped, 'w') as archive:
+                    archive.writestr('BepInEx/plugins/Native/' + name + '.dll', b'Inert fixture DLL: ' + name.encode())
+                    archive.writestr(shared.relative_to(game).as_posix(), name)
+                    archive.writestr('BepInEx/plugins/Native/common.txt', b'Identical shared fixture')
+                packages.append(app.stage_import(app.settings(), zipped))
+            return {'packages': packages}
         return original_dispatch(action, body)
 
     def no_server(*args, **kwargs):
@@ -73,6 +87,7 @@ def main():
         loader_source = workshop / '3807346541/BepInEx/patchers/GK2_WorkshopLoader.dll'
         loader_config = game / 'BepInEx/config/GK2_WorkshopLoader.cfg'
         loader_trust = game / app.inventory.TRUST
+        shared = game / 'BepInEx/plugins/Native/shared.json'
         untouched = folder / 'untouched.txt'
         untouched.write_text('Outside the mod folder', encoding='utf-8')
         app.nexus_credentials.save(data / 'nexus-key.bin', 'native-desktop-dummy-key')
@@ -276,8 +291,38 @@ def main():
     await refresh();
     check(state.workshop_setup.installed && document.getElementById('workshop-setup-banner').hidden,
           'Repeated setup lost the installed state');
+    page('mods');
+    const zipped = await api('__test_import_packages', {});
+    await reviewPackages(zipped.packages);
+    check(document.getElementById('dialog-title').textContent === 'Review ZIP installation' &&
+          document.getElementById('import-choice-0') && actionButton('Install 2 mods').disabled &&
+          document.getElementById('dialog-body').textContent.includes('Native A') &&
+          document.getElementById('dialog-body').textContent.includes('Native B') &&
+          document.getElementById('dialog-body').textContent.includes('Existing file') &&
+          document.querySelector('.import-shared'), 'Batch review omitted choices, owner names or identical sharing');
+    const reviewBounds = document.getElementById('dialog').getBoundingClientRect();
+    check(reviewBounds.left >= 0 && reviewBounds.right <= innerWidth + 1 &&
+          reviewBounds.top >= 0 && reviewBounds.bottom <= innerHeight + 1 &&
+          document.getElementById('dialog-body').scrollWidth <= document.getElementById('dialog-body').clientWidth + 1,
+          'ZIP review overflowed the native viewport');
+    actionButton('Cancel').click();
+    await refresh();
+    check(!state.mods.some(mod => mod.name === 'Native A' || mod.name === 'Native B'),
+          'Cancelling the batch installed a ZIP');
+    await reviewPackages(zipped.packages);
+    const choice = document.getElementById('import-choice-0');
+    choice.value = [...choice.options].find(option => option.textContent === 'Use Native B').value;
+    choice.dispatchEvent(new Event('change', {bubbles:true}));
+    check(!actionButton('Install 2 mods').disabled, 'File selection did not unlock installation');
+    actionButton('Install 2 mods').click();
+    await waitUntil(() => !working && document.getElementById('dialog-title').textContent === 'ZIP installation complete',
+                    'Confirmed batch install did not complete');
+    check(state.mods.some(mod => mod.name === 'Native A') && state.mods.some(mod => mod.name === 'Native B') &&
+          document.getElementById('dialog-body').textContent.includes('2 mods installed') &&
+          !state.conflicts.some(conflict => !conflict.identical),
+          'Batch result did not render the installed packages and resolved file choices');
     await pywebview.api.request('__test_report', {ok: true, bannerWidth: banner.naturalWidth,
-      profileApplied: true, uninstalled: true, workshopInstalled: true});
+      profileApplied: true, uninstalled: true, workshopInstalled: true, batchInstalled: true});
   })().catch(error => pywebview.api.request('__test_report', {ok: false, error: String(error.stack || error)}));
 })();
 """.replace('EXPECTED', expected)
@@ -293,6 +338,7 @@ def main():
                         assert result.get('profileApplied'), 'The real profile workflow did not complete.'
                         assert result.get('uninstalled'), 'The real uninstall workflow did not complete.'
                         assert result.get('workshopInstalled'), 'The real Workshop setup workflow did not complete.'
+                        assert result.get('batchInstalled'), 'The real ZIP batch workflow did not complete.'
                         assert not private_calls, 'Raw messages reached a private Python method.'
                         assert webview.http.global_server is None, 'A web server was started.'
                         break
@@ -348,8 +394,11 @@ def main():
         assert {path.relative_to(game).as_posix() for path in game.rglob('*') if path.is_file()} == {
             'GraveyardKeeper2.exe', 'BepInEx/plugins/FixtureUninstall/settings.cfg',
             'BepInEx/patchers/GK2_WorkshopLoader.dll', 'BepInEx/config/GK2_WorkshopLoader.cfg',
+            'BepInEx/plugins/Native/Native A.dll', 'BepInEx/plugins/Native/Native B.dll',
+            'BepInEx/plugins/Native/common.txt', 'BepInEx/plugins/Native/shared.json',
             app.inventory.TRUST, *app.BEPINEX_FILES}, 'Setup or uninstall changed unexpected fixture files.'
-    print('Native desktop checks passed: serverless bridge/navigation, profile save/review/cancel/apply/layout, uninstall backup/settings, first-run Workshop install/config preservation, and clean shutdown.')
+        assert shared.read_bytes() == b'Native B', 'Batch did not install the selected shared file.'
+    print('Native desktop checks passed: serverless shell, profile/uninstall/setup workflows, ZIP batch choice/cancel/install/layout, and clean shutdown.')
 
 
 if __name__ == '__main__':

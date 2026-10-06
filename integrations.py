@@ -17,8 +17,8 @@ API = 'https://api.nexusmods.com/v1'
 GAME = 'graveyardkeeper2'
 SETUP_MOD = 48
 SETUP_URL = f'https://www.nexusmods.com/{GAME}/mods/{SETUP_MOD}?tab=files'
-HEADERS = {'User-Agent': 'GK2MT/0.1.0', 'Application-Name': 'GK2MT',
-           'Application-Version': '0.1.0', 'Accept': 'application/json'}
+HEADERS = {'User-Agent': 'GK2MT/0.1.1', 'Application-Name': 'GK2MT',
+           'Application-Version': '0.1.1', 'Accept': 'application/json'}
 ROOT_FILES = {'winhttp.dll', 'doorstop_config.ini', '.doorstop_version', 'changelog.txt'}
 REQUIRED = ['winhttp.dll', 'doorstop_config.ini', '.doorstop_version',
             'BepInEx/plugins/ConfigurationManager/ConfigurationManager.dll'] + [
@@ -205,7 +205,7 @@ def steam_workshop_titles(ids: list[str]) -> dict[str, str]:
         request = urllib.request.Request(
             'https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/',
             data=urllib.parse.urlencode(body).encode('ascii'),
-            headers={'User-Agent': 'GK2MT/0.1.0', 'Accept': 'application/json',
+            headers={'User-Agent': 'GK2MT/0.1.1', 'Accept': 'application/json',
                      'Content-Type': 'application/x-www-form-urlencoded'})
         try:
             with opener.open(request, timeout=10) as response:

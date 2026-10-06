@@ -105,6 +105,83 @@ def bulk_repeat():
         assert len(library.state['packages']) == 1 and not library.conflicts()
 
 
+def batch_install_review():
+    with fixture() as data, patch.object(app, 'IMPORT_REVIEWS', {}):
+        shared = 'BepInEx/plugins/shared.json'
+        first = archive(data['root'], 'First', {'BepInEx/plugins/First.dll': 'first DLL', shared: 'first asset'})
+        second = archive(data['root'], 'Second', {'BepInEx/plugins/Second.dll': 'second DLL', shared: 'second asset'})
+        tokens = [app.dispatch('stage', {'path': str(path)})['token'] for path in (first, second)]
+        plan = app.dispatch('install-preview', {'tokens': tokens})
+        conflict = next(item for item in plan['conflicts'] if item['path'] == shared)
+        assert conflict['requires_choice'] and not conflict['owners'] and len(conflict['incoming']) == 2
+        assert not list((data['game'] / 'BepInEx').rglob('*'))
+        rejects(lambda: app.dispatch('install-batch', {'tokens': tokens, 'digest': plan['digest'], 'choices': {}}), 'Choose')
+        assert not app.package_manager(data['config']).state['packages']
+        assert not (data['game'] / 'BepInEx/plugins/First.dll').exists()
+        result = app.dispatch('install-batch', {'tokens': tokens, 'digest': plan['digest'], 'choices': {shared: tokens[1]}})
+        assert result['installed'] == 2 and result['skipped'] == 0
+        assert result['results'][0]['excluded_paths'] == [shared]
+        assert (data['game'] / shared).read_text() == 'second asset'
+        assert not app.package_manager(data['config']).conflicts()
+
+
+def changed_install_review():
+    with fixture() as data, patch.object(app, 'IMPORT_REVIEWS', {}):
+        staged = app.dispatch('stage', {'path': str(data['release'])})
+        tokens = [staged['token']]
+        plan = app.dispatch('install-preview', {'tokens': tokens})
+        data['target'].parent.mkdir(parents=True)
+        data['target'].write_bytes(b'installed by another app after review')
+        rejects(lambda: app.dispatch('install-batch', {'tokens': tokens, 'digest': plan['digest'], 'choices': {}}), 'changed')
+        assert data['target'].read_bytes() == b'installed by another app after review'
+        assert not app.package_manager(data['config']).state['packages']
+        # The old single-install API must not bypass the same conflict review.
+        staged = app.dispatch('stage', {'path': str(data['release'])})
+        rejects(lambda: app.dispatch('install', {'token': staged['token']}), 'Choose')
+        result = app.dispatch('install', {'token': staged['token'], 'choices': {
+            'BepInEx/plugins/Example.dll': 'keep_existing'}})
+        assert result['status'] == 'kept_existing' and not app.package_manager(data['config']).state['packages']
+        assert data['target'].read_bytes() == b'installed by another app after review'
+
+
+def batch_duplicate_review():
+    with fixture() as data, patch.object(app, 'IMPORT_REVIEWS', {}):
+        row = steam_copy(data)
+        actual_snapshot = app.snapshot
+        def with_steam():
+            value = actual_snapshot()
+            value['mods'] = [mod for mod in value['mods'] if mod['id'] != row['id']] + [copy.deepcopy(row)]
+            return value
+        with patch.object(app, 'snapshot', side_effect=with_steam):
+            staged = app.dispatch('stage', {'path': str(data['release'])})
+            tokens = [staged['token']]
+            plan = app.dispatch('install-preview', {'tokens': tokens})
+            assert plan['packages'][0]['requires_duplicate_ack']
+            request = {'tokens': tokens, 'digest': plan['digest'], 'choices': {}}
+            rejects(lambda: app.dispatch('install-batch', request), 'acknowledge')
+            row['enabled'] = True
+            rejects(lambda: app.dispatch('install-batch', request | {'acknowledge_duplicates': True}), 'changed')
+            assert not data['target'].exists()
+            plan = app.dispatch('install-preview', {'tokens': tokens})
+            result = app.dispatch('install-batch', request | {
+                'digest': plan['digest'], 'acknowledge_duplicates': True})
+            assert result['installed'] == 1 and data['target'].read_bytes() == b'new release'
+
+
+def reviewed_import_metadata():
+    with fixture() as data, patch.object(app, 'IMPORT_REVIEWS', {}):
+        metadata = {'name': 'Reviewed Example', 'version': '2.0', 'nexus_mod_id': 10, 'file_id': 2}
+        staged = app.dispatch('stage', {'path': str(data['release']), 'metadata': metadata})
+        assert staged['name'] == metadata['name']
+        rejects(lambda: app.dispatch('install', {'token': staged['token'],
+            'metadata': metadata | {'file_id': 3}}), 'changed')
+        assert not data['target'].exists()
+        result = app.dispatch('install', {'token': staged['token'], 'metadata': metadata})
+        assert result['status'] == 'installed'
+        installed = app.package_manager(data['config']).state['packages'][0]
+        assert all(installed[key] == value for key, value in metadata.items())
+
+
 def browser_duplicate_review():
     with fixture() as data:
         row = steam_copy(data)
@@ -146,8 +223,12 @@ def main():
             repeat_imports(Path(temporary))
         import_review()
         bulk_repeat()
+        batch_install_review()
+        changed_install_review()
+        batch_duplicate_review()
+        reviewed_import_metadata()
         browser_duplicate_review()
-    print('Imports passed: identical/re-zipped/disabled/legacy packages, bulk repeats, safe ZIP validation, duplicate review and cancellation.')
+    print('Imports passed: repeat ZIPs, guarded batch and legacy installs, per-file choices, stale reviews, duplicate acknowledgement and browser cancellation.')
 
 
 if __name__ == '__main__':

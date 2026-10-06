@@ -36,7 +36,7 @@ The desktop build runs as a single **GK2MT.exe** with its own window, native fil
 | **BepInEx & Workshop** | Sets up the supported BepInEx bundle and guides Workshop Loader subscription, download, and installation into the game's patchers folder. |
 | **Updates & changelogs** | Checks linked Nexus mods, shows the selected release's changelog, and downloads verified updates with backups. Free and Premium accounts have supported download paths. |
 | **Duplicate warnings** | Warns before installing another Steam/Nexus copy of a plugin, including disabled copies, and highlights existing duplicates. |
-| **File conflict rules** | Reviews overlapping imported files and sets before/after package rules with cycle detection. Disabling an override restores the previous package or original file. |
+| **File conflict review & rules** | Reviews all selected ZIPs together, names active and disabled copies, and requires a choice for differing shared files. Identical files stay shared. Installed package rules handle file overlaps; runtime mod compatibility still needs checking. |
 | **Mod profiles** | Saves and shares mod selections. A guided checklist resolves missing mods and release differences before you review and apply enable/disable changes. |
 | **Steam Deck sync** | Connects by SSH, detects Deck folders, verifies matching game builds, previews mod differences, backs up files, syncs PC → Deck, and verifies hashes. |
 | **Everyday controls** | Launches through Steam, rescans installed mods, reversibly enables/disables supported mods, and reviews Nexus/manual uninstalls with recovery backups. |

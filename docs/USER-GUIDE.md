@@ -24,7 +24,11 @@ Close the game before installing, updating, enabling, disabling, uninstalling, o
 
 Drag one or more ZIPs onto GK2MT, or choose **Install ZIP** in **My mods**. To install a collection of downloaded ZIPs, put them in your configured import folder and choose **Import folder**.
 
-GK2MT checks the archive layout and shows a review before installing. Standard BepInEx plugin and patcher layouts, including bare plugin DLLs, are supported. Identical archives and identical mod payloads are skipped, keeping the existing enabled state and settings.
+GK2MT checks the archive layout and reviews all selected ZIPs together before changing any game files. Standard BepInEx plugin and patcher layouts, including bare plugin DLLs, are supported. Identical archives and identical mod payloads are skipped, keeping the existing enabled state and settings.
+
+The review names the incoming mods and existing copies at each shared destination, including disabled copies. For every file whose bytes differ, choose **Keep existing file** or a named incoming mod; installation stays locked until all choices are made. Keeping a disabled copy leaves it disabled. Other files install normally, but a ZIP with no DLL remaining after your choices is skipped to avoid installing an incomplete mod.
+
+Identical shared files appear as optional information and need no choice. They retain shared ownership, so disabling or removing one package keeps the file available to another. If files, package settings, or matching copies change after the review, installation stops and requires **Review again** with fresh choices.
 
 If a matching Steam or local copy exists, the review shows it—even if that copy is disabled. Installing another copy requires an explicit acknowledgement. Keep only one copy enabled before launching.
 
@@ -53,7 +57,7 @@ Steam manages Workshop subscriptions and updates. GK2MT can open an item's Works
 - **Enable or disable:** use the checkbox. Workshop changes and loader approval take effect on the next game launch.
 - **Inspect or edit details:** open the **⋯** action menu. Add a Nexus mod ID and, when needed, a file ID to track a release that was not detected automatically.
 - **Uninstall:** choose **Uninstall mod**, review the exact removed or restored files, and confirm. Configs are kept and the result gives the backup location. Remove Steam mods by unsubscribing in Steam. The BepInEx foundation cannot be removed through this action.
-- **Resolve file conflicts:** use **Conflict rules** for packages imported into GK2MT. Before/after rules determine which package supplies a shared file; later packages win. These are file overwrite rules, not BepInEx runtime plugin load-order rules.
+- **Resolve file conflicts:** use **Conflict rules** for installed imported packages. Before/after rules determine which package supplies a differing shared file; later packages win. Identical shared files appear in a neutral, folded section and do not increase the library's file conflict count. These rules handle file overlaps, not BepInEx runtime plugin load order; zero file conflicts does not guarantee the mods work together in the game.
 
 GK2MT works independently of Vortex and can discover existing installations. Avoid having both managers deploy the same mods. Vortex may restore a mod you remove in GK2MT unless you also disable or remove it there. Rescan after another manager changes files.
 

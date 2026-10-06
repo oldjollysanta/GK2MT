@@ -552,7 +552,7 @@ def snapshot():
             'workshop_loader': inventory.loader_info(game), 'workshop_setup': workshop_setup(config),
             'game_found': (game / 'GraveyardKeeper2.exe').exists(), 'nexus_connected': bool(NEXUS_KEY),
             'nexus_saved': (DATA / 'nexus-key.bin').is_file(), 'nexus_error': NEXUS_ERROR,
-            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.0',
+            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.1',
             'deck_connection': deck_connection(config), **download_state()}
 
 
@@ -767,12 +767,12 @@ def apply_updates(config, identifier=None):
             'message': f'{len(updated)} mod(s) updated; {len(skipped)} skipped; {len(errors)} failed. Replaced files were backed up.'}
 
 
-def import_duplicates(config, package, metadata=None):
+def import_duplicates(config, package, metadata=None, rows=None):
     """Use the library's existing Steam/local identity check before writing any files."""
     candidate = dict(package, id='incoming:' + package['id'], source='GK2MT')
     candidate.update({key: value for key, value in (metadata or {}).items()
                       if key in ('name', 'nexus_mod_id') and value})
-    rows = snapshot()['mods']
+    rows = snapshot()['mods'] if rows is None else rows
     by_id = {row['id']: row for row in rows}
     groups = inventory.duplicate_groups(rows + [candidate])
     result = []
@@ -791,38 +791,70 @@ def import_duplicates(config, package, metadata=None):
     return sorted(result, key=lambda row: row['id'])
 
 
-def stage_import(config, archive):
+def preview_imports(config, tokens, metadata=None, remember=True):
+    """Bind one read-only review to all selected files and matching Steam copies."""
+    if (not isinstance(tokens, list) or not 1 <= len(tokens) <= 100
+            or any(not isinstance(token, str) for token in tokens) or len(set(tokens)) != len(tokens)):
+        raise ValueError('Choose between 1 and 100 distinct staged ZIP packages.')
     library = package_manager(config)
-    preview = library.stage(archive)
-    package = manager.read_json(library.data / 'staging' / preview['token'] / 'package.json', {})
-    duplicates = [] if preview['status'] == 'already_installed' else import_duplicates(config, package)
-    IMPORT_REVIEWS[preview['token']] = {'game': str(library.game.resolve()), 'duplicates': duplicates}
-    return preview | {'duplicates': duplicates, 'requires_duplicate_ack': bool(duplicates),
-                      'warnings': ['Another Steam/local copy is already installed. Keep only one enabled copy.']
-                                  if duplicates else []}
+    plan = library.plan_install(tokens, metadata)
+    rows = snapshot()['mods'] if any(p['status'] == 'ready' for p in plan['packages']) else []
+    for summary in plan['packages']:
+        duplicates = []
+        if summary['status'] == 'ready':
+            package = manager.read_json(library.data / 'staging' / summary['token'] / 'package.json', {})
+            duplicates = import_duplicates(config, package, (metadata or {}).get(summary['token']), rows)
+        summary.update(duplicates=duplicates, requires_duplicate_ack=bool(duplicates),
+                       warnings=['Another Steam/local copy is already installed. Keep only one enabled copy.']
+                                if duplicates else [])
+    review = {'game': str(library.game.resolve()), 'tokens': tokens, 'plan_digest': plan['digest'],
+              'duplicates': {p['token']: p['duplicates'] for p in plan['packages']}}
+    digest = hashlib.sha256(json.dumps(review, sort_keys=True).encode()).hexdigest()
+    if remember:
+        IMPORT_REVIEWS[digest] = review
+    return plan | {'digest': digest}
 
 
-def install_import(config, token, metadata=None, acknowledge_duplicates=False):
+def install_import_batch(config, tokens, choices, digest, acknowledge_duplicates=False, metadata=None):
+    reviewed = IMPORT_REVIEWS.get(digest) if isinstance(digest, str) else None
+    if not reviewed or reviewed.get('tokens') != tokens:
+        raise ValueError('Review these ZIPs before installing.')
+    current = preview_imports(config, tokens, metadata, remember=False)
+    if current['digest'] != digest:
+        raise ValueError('Files or matching Steam/local copies changed. Review these ZIPs again before installing; no files changed.')
+    if any(p['requires_duplicate_ack'] for p in current['packages']) and acknowledge_duplicates is not True:
+        raise ValueError('A Steam/local copy is already installed. Review and acknowledge the duplicate warning first.')
+    result = package_manager(config).install_batch(tokens, choices, reviewed['plan_digest'], metadata)
+    IMPORT_REVIEWS.pop(digest, None)
+    for token in tokens:
+        IMPORT_REVIEWS.pop(token, None)
+    return result | {'message': f"{result['installed']} mod(s) installed; {result['skipped']} ZIP(s) skipped. Replaced files were backed up."}
+
+
+def stage_import(config, archive, metadata=None):
+    preview = package_manager(config).stage(archive)
+    plan = preview_imports(config, [preview['token']], {preview['token']: metadata} if metadata else None)
+    summary = plan['packages'][0]
+    IMPORT_REVIEWS[preview['token']] = {'digest': plan['digest']}
+    return preview | {key: summary[key] for key in ('name', 'duplicates', 'requires_duplicate_ack', 'warnings')} | {
+        'digest': plan['digest']}
+
+
+def install_import(config, token, metadata=None, acknowledge_duplicates=False, choices=None, digest=None):
     library = package_manager(config)
     if not isinstance(token, str) or not re.fullmatch('[a-f0-9]{32}', token):
         raise ValueError('Invalid staging token.')
     package = manager.read_json(library.data / 'staging' / token / 'package.json', None)
     if not package:
         raise ValueError('Staged package is missing. Choose the ZIP again.')
-    if not library.identical_package(package):
-        duplicates = import_duplicates(config, package, metadata)
-        reviewed = IMPORT_REVIEWS.get(token)
-        if duplicates and (not reviewed or reviewed['game'] != str(library.game.resolve())
-                           or reviewed['duplicates'] != duplicates):
-            raise ValueError('The matching Steam/local copies changed. Review this ZIP again before installing.')
-        if duplicates and acknowledge_duplicates is not True:
-            raise ValueError('A Steam/local copy is already installed. Review and acknowledge the duplicate warning first.')
-    installed = library.install(token, metadata)
-    IMPORT_REVIEWS.pop(token, None)
-    skipped = installed.get('import_status') == 'already_installed'
-    return {'status': 'already_installed' if skipped else 'installed', 'id': installed['id'],
-            'message': f"{installed['name']} is already installed. Skipped; its enabled state and files were kept."
-                       if skipped else 'Package installed. Replaced files were backed up.'}
+    existing = library.identical_package(package)
+    if existing:
+        return {'status': 'already_installed', 'id': existing['id'],
+                'message': f"{existing['name']} is already installed. Skipped; its enabled state and files were kept."}
+    digest = digest or IMPORT_REVIEWS.get(token, {}).get('digest')
+    result = install_import_batch(config, [token], choices or {}, digest, acknowledge_duplicates,
+                                  {token: metadata} if metadata else None)
+    return result['results'][0] | {'message': result['message']}
 
 
 def download_job(job):
@@ -1337,7 +1369,7 @@ def dispatch(action, body):
         UPDATES = None
         return {'message': 'Mod details saved.'}
     if action == 'stage':
-        return stage_import(config, body['path'])
+        return stage_import(config, body['path'], body.get('metadata'))
     if action == 'stage-folder':
         folder = Path(config['import_folder'])
         if folder == Path.home() / 'Downloads/GK2MT':
@@ -1355,8 +1387,16 @@ def dispatch(action, body):
                 errors.append(file.name + ': ' + str(exc))
         return {'packages': staged, 'errors': errors}
     if action == 'install':
-        result = install_import(config, body['token'], body.get('metadata'), body.get('acknowledge_duplicates'))
-        PREVIEW = None
+        result = install_import(config, body['token'], body.get('metadata'), body.get('acknowledge_duplicates'),
+                                body.get('choices'), body.get('digest'))
+        PREVIEW = PROFILE_PREVIEW = None
+        return result
+    if action == 'install-preview':
+        return preview_imports(config, body.get('tokens'), body.get('metadata'))
+    if action == 'install-batch':
+        result = install_import_batch(config, body.get('tokens'), body.get('choices'), body.get('digest'),
+                                      body.get('acknowledge_duplicates'), body.get('metadata'))
+        PREVIEW = PROFILE_PREVIEW = None
         return result
     if action == 'rules':
         package_manager(config).set_rules(body['rules'])

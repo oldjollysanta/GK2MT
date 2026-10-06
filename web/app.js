@@ -61,7 +61,7 @@ function render() {
   $('nav-count').textContent=state.mods.length; $('total').textContent=state.mods.length;
   $('enabled').textContent=state.mods.filter(m=>m.enabled).length;
   $('workshop-count').textContent=new Set(state.mods.filter(m=>m.workshop_id).map(m=>m.workshop_id)).size;
-  $('conflict-count').textContent=state.conflicts.length;
+  $('conflict-count').textContent=state.conflicts.filter(conflict=>conflict.identical!==true).length;
   $('loader-status').textContent=state.loader_installed?'BepInEx installed':'BepInEx not detected';
   $('loader-status').classList.toggle('missing',!state.loader_installed);
   $('foundation-banner').hidden=!state.game_found || state.loader_installed;
@@ -139,8 +139,9 @@ function renderRules(){
   const packages=state.mods.filter(m=>m.source==='GK2MT');const options=packages.map(m=>`<option value="${esc(m.id)}">${esc(m.name)}</option>`).join('');
   $('rule-first').innerHTML=options;$('rule-second').innerHTML=options;if(packages.length>1)$('rule-second').selectedIndex=1;
   const name=id=>state.mods.find(m=>m.id===id)?.name || id;
+  const conflicts=state.conflicts.filter(conflict=>conflict.identical!==true),shared=state.conflicts.filter(conflict=>conflict.identical===true);
   $('rules-list').innerHTML='<h2>Your rules</h2>'+(state.rules.length?state.rules.map((r,i)=>`<div class="item-line"><span>${esc(name(r.after))} <strong class="gold">after</strong> ${esc(name(r.before))}</span><button data-remove-rule="${i}">Remove</button></div>`).join(''):'<p class="muted">No rules yet. Import ZIP packages to manage their file conflicts.</p>');
-  $('conflicts-list').innerHTML=state.conflicts.length?state.conflicts.map(c=>`<div class="item-line"><div><code>${esc(c.path)}</code><div class="footnote">${c.packages.map(name).map(esc).join(' → ')}</div></div><span class="badge">${esc(name(c.winner))} wins</span></div>`).join(''):'<p class="muted">No overlapping files between enabled GK2MT packages.</p>';
+  $('conflicts-list').innerHTML=(conflicts.length?conflicts.map(c=>`<div class="item-line"><div><code>${esc(c.path)}</code><div class="footnote">${c.packages.map(name).map(esc).join(' → ')}</div></div><span class="badge">${esc(name(c.winner))} wins</span></div>`).join(''):'<p class="muted">No differing file overlaps between enabled imported packages.</p>')+(shared.length?`<details class="import-shared"><summary>${shared.length} identical shared file${shared.length===1?'':'s'} · no file conflict</summary><p class="small muted">These enabled packages contain the same bytes and share the files.</p>${shared.map(c=>`<div class="import-shared-file"><code class="import-path">${esc(c.path)}</code><div class="footnote">${c.packages.map(name).map(esc).join(' · ')}</div></div>`).join('')}</details>`:'')+'<p class="footnote">Installed file overlaps only. Mods can still conflict when the game runs.</p>';
 }
 function updateReason(update){
   if(update.blocked_reason)return update.blocked_reason;
@@ -455,7 +456,7 @@ async function stagePaths(paths){
     if(typeof path!=='string' || !/\.zip$/i.test(path)){errors.push('Only ZIP files can be imported as mods.');continue;}
     try{packages.push(await api('stage',{path}));}catch(error){errors.push(path.split(/[\\/]/).pop()+': '+error.message);}
   }
-  reviewPackages(packages,errors);
+  await reviewPackages(packages,errors);
 }
 function setupArchive(result={}){
   modal('Set up BepInEx from Nexus #48',`<p>${esc(result.message || 'Download the BepInEx for Graveyard Keeper 2 ZIP from Nexus, then select it here. Your current Workshop loader and configs are preserved.')}</p><p><a href="https://www.nexusmods.com/graveyardkeeper2/mods/48?tab=files" target="_blank" rel="noreferrer">Open Nexus download page ↗</a></p>${result.choices?.length?`<label>Available package<select id="setup-file">${result.choices.map(f=>`<option value="${Number(f.file_id)}">${esc(f.name || f.file_name)} · ${esc(f.version || '')}</option>`).join('')}</select></label>`:''}<label>Downloaded ZIP path<input id="setup-archive" placeholder="Paste the full path to the Nexus #48 ZIP"></label>`,[
@@ -470,17 +471,48 @@ function runSetup(body={}){return work('Preparing BepInEx from Nexus #48…',asy
   await refresh();
   modal('BepInEx setup complete',`<p>${esc(result.message)}</p><p>${Number(result.files)} files installed.</p><p class="footnote">Original files backed up to:</p><pre>${esc(result.backup)}</pre>`,[['Done',()=>$('dialog').close(),true]]);
 });}
-function reviewPackages(packages,errors){
-  const ready=packages.filter(p=>p.status!=='already_installed'),skipped=packages.length-ready.length;
+function importOwners(conflict){
+  const owners=(conflict.owners || []).map(owner=>`<li><strong>${esc(owner.name)}</strong><span>${owner.enabled?'enabled':'disabled'}${owner.kind==='file'?' · current file':owner.kind==='disabled_file'?' · disabled file':''}</span></li>`).join('');
+  const incoming=(conflict.incoming || []).map(mod=>`<li><strong>${esc(mod.name)}</strong><span>incoming ZIP</span></li>`).join('');
+  return `<ul class="import-owners">${owners}${incoming}</ul>`;
+}
+function importResult(result,errors=[]){
+  const rows=result.results || [],installed=rows.filter(p=>p.status==='installed').length,skipped=rows.length-installed;
+  const explanation={already_installed:'Already installed · skipped. Its enabled state and files were kept.',already_selected:'Identical ZIP in this selection · skipped.',kept_existing:'Skipped: the selected existing file was kept. No separate DLL remained to install.'};
+  modal('ZIP installation complete',`<div class="import-review"><p role="status">${installed} mod${installed===1?'':'s'} installed${skipped?` · ${skipped} skipped`:''}.</p>${rows.map(p=>`<div class="import-package"><strong>${esc(p.name)}</strong><p class="small ${p.status==='installed'?'green':'muted'}">${esc(p.reason || p.message || explanation[p.status] || 'Installed. Replaced files were backed up.')}</p>${p.excluded_paths?.length?`<details><summary>${p.excluded_paths.length} shared files kept from your selection</summary><ul class="path-list">${p.excluded_paths.map(path=>`<li>${esc(path)}</li>`).join('')}</ul></details>`:''}</div>`).join('')}${errors.length?`<p class="warning">These ZIPs were not installed:</p><ul class="warning">${errors.map(error=>`<li>${esc(error)}</li>`).join('')}</ul>`:''}</div>`,[['Done',()=>$('dialog').close(),true]]);
+  $('dialog-body').scrollTop=0;focusAfterWork($('dialog-title'));
+  toast(`${installed} mod${installed===1?'':'s'} installed${skipped?` · ${skipped} skipped`:''}.`);
+}
+async function reviewPackages(packages,errors=[]){
+  const tokens=[...new Set(packages.map(p=>p.token))];
+  let preview;
+  try{preview=tokens.length?await api('install-preview',{tokens}):{packages:[],conflicts:[]};}
+  catch(error){
+    modal('ZIP review needs attention',`<p class="warning" role="alert">${esc(error.message)}</p><p class="small">The ZIPs have not been installed. Review them again to check the current files.</p>`,[['Cancel',()=>$('dialog').close()],['Review again',()=>work('Checking the ZIPs again…',()=>reviewPackages(packages,errors)),true]]);
+    $('dialog-body').scrollTop=0;focusAfterWork($('dialog-title'));return;
+  }
+  const reviewed=preview.packages || [],ready=reviewed.filter(p=>p.status==='ready'),skipped=reviewed.length-ready.length;
+  const conflicts=(preview.conflicts || []).filter(conflict=>conflict.requires_choice),shared=(preview.conflicts || []).filter(conflict=>!conflict.requires_choice);
   const duplicate=ready.some(p=>p.requires_duplicate_ack || p.duplicates?.length);
-  modal('Review ZIP installation',`<p class="muted">${ready.length} ready to install${skipped?` · ${skipped} already installed and skipped`:''}.${ready.length?' Close the game first. Replaced files are backed up.':' No files need changing.'}</p>${packages.map(p=>`<div class="item-line"><div><strong>${esc(p.name)}</strong>${p.status==='already_installed'?'<p class="small green">Already installed · skipped. Its current enabled state is kept.</p>':`<p class="footnote">${Number(p.files)} files · ${(p.conflicts || []).length} existing paths${p.validation?.message?' · '+esc(p.validation.message):''}</p>${p.duplicates?.length?duplicatePreview(p.duplicates):''}${p.conflicts?.length?`<details><summary>Files that will be replaced</summary><pre>${esc(p.conflicts.join('\n'))}</pre></details>`:''}`}</div></div>`).join('')}${errors.length?`<ul class="warning">${errors.map(e=>`<li>${esc(e)}</li>`).join('')}</ul>`:''}${duplicate?'<label class="inline-check duplicate-accept"><input id="import-duplicate-accept" type="checkbox"> Install the additional copy. I’ll keep only one copy enabled before launching.</label>':''}`,[['Cancel',()=> $('dialog').close()],...(ready.length?[['Install '+ready.length+' mod'+(ready.length===1?'':'s'),()=>work('Installing mods and saving originals…',async()=>{
-    if(duplicate && !$('import-duplicate-accept').checked)throw new Error('Review the existing copy and confirm before installing another.');
-    let completed=0,already=skipped;
-    try{for(const p of ready){const result=await api('install',{token:p.token,acknowledge_duplicates:duplicate});if(result.status==='already_installed')already++;else completed++;}}
-    finally{$('dialog').close();await refresh();await refreshSelectedProfile();}
-    toast(`${completed} mod${completed===1?'':'s'} installed${already?` · ${already} already installed and skipped`:''}.`);
-  }),true,duplicate?'Confirm the duplicate copy choice above.':'']]:[['Done',()=>$('dialog').close(),true]])]);
-  if(duplicate){const button=$('dialog-actions').lastElementChild;$('import-duplicate-accept').addEventListener('change',event=>{button.disabled=!event.target.checked;button.title=button.disabled?'Confirm the duplicate copy choice above.':'';});}
+  const choices={};let needsReview=false,duplicateAcknowledged=false;
+  const reason=()=>conflicts.some(conflict=>!choices[conflict.path])?'Choose which file to keep for each shared path.':duplicate && !duplicateAcknowledged?'Confirm the duplicate copy choice above.':'';
+  const submit=()=>work(needsReview?'Checking the ZIPs again…':'Installing mods and saving originals…',async()=>{
+    if(needsReview)return reviewPackages(packages,errors);
+    duplicateAcknowledged=duplicate && $('import-duplicate-accept').checked===true;
+    if(reason())throw new Error(reason());
+    let result;
+    try{result=await api('install-batch',{tokens,choices,digest:preview.digest,acknowledge_duplicates:duplicate});}
+    catch(error){
+      needsReview=true;const message=$('import-review-error');message.textContent=error.message+' Review the ZIPs again before installing.';message.hidden=false;
+      const button=$('dialog-actions').lastElementChild;button.textContent='Review again';button.disabled=false;button.title='';message.scrollIntoView({block:'nearest',behavior:'instant'});focusAfterWork(message);return;
+    }
+    importResult(result,errors);await refresh();await refreshSelectedProfile();
+  });
+  modal('Review ZIP installation',`<div class="import-review"><p class="muted">${ready.length} ready to install${skipped?` · ${skipped} already installed or selected and skipped`:''}.${ready.length?' Close the game first. Replaced files are backed up.':' No files need changing.'}</p><div class="import-packages">${reviewed.map(p=>`<div class="import-package"><strong>${esc(p.name)}</strong>${p.status==='already_installed'?'<p class="small green">Already installed · skipped. Its current enabled state is kept.</p>':p.status==='already_selected'?'<p class="small green">Identical ZIP in this selection · skipped.</p>':`<p class="small muted">${Number(p.files)} files${p.validation?.message?' · '+esc(p.validation.message):''}</p>${p.duplicates?.length?duplicatePreview(p.duplicates):''}`}</div>`).join('')}</div>${conflicts.length?`<section class="import-conflicts" aria-labelledby="import-conflicts-title"><h3 id="import-conflicts-title">${conflicts.length} shared file${conflicts.length===1?' needs':'s need'} a choice</h3><p class="small muted">Choose the file to keep at each destination. Other files install normally. Keeping a disabled copy does not enable it; a ZIP with no DLL left is skipped.</p>${conflicts.map((conflict,index)=>`<article class="import-conflict"><label for="import-choice-${index}"><strong>${esc(conflict.path.split(/[\\/]/).pop())}</strong><span class="import-path">${esc(conflict.path)}</span></label>${importOwners(conflict)}<select id="import-choice-${index}" aria-label="File to keep for ${esc(conflict.path)}" aria-required="true"><option value="">Choose which file to keep…</option>${(conflict.choices || []).map(choice=>`<option value="${esc(choice.value)}">${esc(choice.label)}</option>`).join('')}</select></article>`).join('')}</section>`:''}${shared.length?`<details class="import-shared"><summary>${shared.length} shared file${shared.length===1?'':'s'} with identical bytes · no choice needed</summary><p class="small muted">These files match exactly and can be shared. Removing or disabling one mod keeps the file available to the other.</p>${shared.map(conflict=>`<div class="import-shared-file"><span class="import-path">${esc(conflict.path)}</span>${importOwners(conflict)}</div>`).join('')}</details>`:''}${errors.length?`<p class="warning">These ZIPs could not be prepared:</p><ul class="warning">${errors.map(error=>`<li>${esc(error)}</li>`).join('')}</ul>`:''}${duplicate?'<label class="inline-check duplicate-accept"><input id="import-duplicate-accept" type="checkbox"> Install the additional copy. I’ll keep only one copy enabled before launching.</label>':''}<p id="import-review-status" class="small muted" role="status"></p><p id="import-review-error" class="warning" role="alert" hidden></p></div>`,[['Cancel',()=>$('dialog').close()],...(ready.length?[['Install '+ready.length+' mod'+(ready.length===1?'':'s'),submit,true,reason()]]:[['Done',()=>$('dialog').close(),true]])]);
+  const updateButton=()=>{if(needsReview)return;duplicateAcknowledged=duplicate && $('import-duplicate-accept').checked===true;const message=reason(),button=$('dialog-actions').lastElementChild;button.disabled=!!message;button.title=message;$('import-review-status').textContent=message || (ready.length?'Ready to install with your file choices.':'');};
+  conflicts.forEach((conflict,index)=>$('import-choice-'+index).addEventListener('change',event=>{const value=event.target.value;if((conflict.choices || []).some(choice=>choice.value===value))choices[conflict.path]=value;else delete choices[conflict.path];updateButton();}));
+  if(duplicate)$('import-duplicate-accept').addEventListener('change',updateButton);
+  updateButton();$('dialog-body').scrollTop=0;focusAfterWork($('dialog-title'));
 }
 function duplicatePreview(copies){return `<div class="callout duplicate-preview"><strong>Another copy is already installed</strong><ul>${copies.map(copy=>`<li>${esc(copy.name)} · ${esc(copy.source || sourceLabel(copy))} · ${copy.enabled?'enabled':'disabled'}</li>`).join('')}</ul><p class="small">Installing both Steam and Nexus/manual copies can cause conflicts. Cancel to keep the existing copy.</p></div>`;}
 function approveDownload(id){
@@ -552,7 +584,7 @@ $('steam-downloads').onclick=()=>work('Opening Steam…',async()=>toast((await a
 $('save-settings').onclick=()=>work('Saving locations…',async()=>{await api('settings',locationsBody());await refresh(true);toast('Settings saved.');});
 $('auto-detect').onclick=()=>work('Looking through Steam libraries…',async()=>{const result=await api('discover',{});if(result.game)$('game-path').value=result.game;if(result.workshop)$('workshop-path').value=result.workshop;toast('Detected paths filled in. Save locations to use them.');});
 $('import-zip').onclick=()=>work('Choose a mod ZIP…',async()=>{const result=await api('browse',{kind:'zip'});if(result.path)await stagePath(result.path);});
-$('import-folder').onclick=()=>work('Inspecting ZIPs in your import folder…',async()=>{const result=await api('stage-folder',{});reviewPackages(result.packages,result.errors);});
+$('import-folder').onclick=()=>work('Inspecting ZIPs in your import folder…',async()=>{const result=await api('stage-folder',{});await reviewPackages(result.packages,result.errors);});
 $('add-rule').onclick=()=>work('Checking and applying rule…',async()=>{const a=$('rule-first').value,b=$('rule-second').value;const rule=$('rule-order').value==='after'?{before:b,after:a}:{before:a,after:b};await api('rules',{rules:[...state.rules,rule]});await refresh();toast('Rule applied.');});
 $('nexus-connect').onclick=()=>work('Connecting Nexus…',async()=>{const key=$('nexus-key').value,remember_key=$('nexus-remember').checked;$('nexus-key').value='';$('nexus-remember-option').hidden=true;await api('nexus-connect',{key,remember_key});await refresh();toast(remember_key?'Nexus key saved securely for future launches.':'Nexus connected for this session.');});
 $('nexus-key').addEventListener('input',()=>$('nexus-remember-option').hidden=!$('nexus-key').value.trim());
