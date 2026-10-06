@@ -6,7 +6,7 @@
 
 ## Quick Setup
 
-Run **GK2MT.exe**. No Python installation is needed; Windows must have the **Microsoft Edge WebView2 Runtime** installed. Settings stay in `%LOCALAPPDATA%\GK2MT`, so moving the executable does not reset your setup.
+Download [GK2MT.exe](https://github.com/oldjollysanta/GK2MT/releases/latest/download/GK2MT.exe) from the [latest release](https://github.com/oldjollysanta/GK2MT/releases/latest), then double-click it. You need **Windows x64** and the **Microsoft Edge WebView2 Runtime**; no Python installation or source build is needed. Settings stay in `%LOCALAPPDATA%\GK2MT`, so moving the executable does not reset your setup.
 
 Quick Setup opens on first use and continues to appear until you choose **Finish setup**. Green fields are ready, yellow fields need attention, and empty optional fields stay neutral. Reopen it anytime from **Locations & setup**.
 

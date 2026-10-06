@@ -2,6 +2,8 @@
 
 GK2MT is a Windows desktop application built with Python, pywebview, and a local HTML/CSS/JavaScript interface. Python owns file operations, Nexus integration, and SSH; the interface calls the native bridge. The application does not need a local web server.
 
+For normal use, download [GK2MT.exe from the latest release](https://github.com/oldjollysanta/GK2MT/releases/latest/download/GK2MT.exe). It needs Windows x64 and WebView2, with no Python installation. The source, test, and build instructions below are optional for contributors and advanced users; see the [user guide](USER-GUIDE.md) to get started with the app.
+
 [Run from source](#run-from-source) · [Tests](#tests) · [Build the executable](#build-the-executable) · [Optional HotkeyManager](#optional-hotkeymanager) · [Repository hygiene](#repository-hygiene)
 
 ## Requirements

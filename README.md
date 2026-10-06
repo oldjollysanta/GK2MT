@@ -12,7 +12,7 @@ One Windows app for your mods, profiles, updates, and matching Steam Deck setup.
 
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-d8bd79)](LICENSE)
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-788f82)
-![Status: Source preview](https://img.shields.io/badge/status-source%20preview-78939e)
+[![Download latest release](https://img.shields.io/badge/download-latest%20release-78939e)](https://github.com/oldjollysanta/GK2MT/releases/latest)
 
 [Get started](#get-started) · [Features](#features) · [Screenshots](#screenshots) · [User guide](docs/USER-GUIDE.md) · [Build & contribute](docs/DEVELOPMENT.md)
 
@@ -44,13 +44,11 @@ The desktop build runs as a single **GK2MT.exe** with its own window, native fil
 
 ## Get started
 
-This repository contains the complete source and build instructions. To create the Windows executable, install **Python 3.11+**, clone or download the repository, then run from its folder:
+1. **[Download GK2MT.exe](https://github.com/oldjollysanta/GK2MT/releases/latest/download/GK2MT.exe)** from the **[latest release](https://github.com/oldjollysanta/GK2MT/releases/latest)**.
+2. **Double-click GK2MT.exe.** It runs as a standalone Windows x64 app; no Python installation or source build is needed.
+3. **Follow Quick Setup** to confirm your folders and mod support. Existing settings and saved connections are preserved.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\Build-GK2MT.ps1
-```
-
-Open **`dist\GK2MT.exe`**. The build includes Python, SSH support, and the app's assets. Other Windows PCs need the **[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)** but do not need Python or the source files alongside the executable.
+The app uses **[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)**, which is installed on many Windows PCs. Install it if it is missing. The release also includes license notices, checksums, and matching source downloads.
 
 Quick Setup opens on first use and continues until completed:
 
@@ -61,14 +59,31 @@ Quick Setup opens on first use and continues until completed:
 
 Close the game before installing, updating, uninstalling, or syncing mods. After setup, launch it to confirm loading and approve Workshop mods if the loader requests it.
 
-For running directly from source:
+<details>
+<summary><strong>Advanced setup (optional) — run from source or build your own EXE</strong></summary>
+
+Install **Python 3.11+**, clone or download this repository, and run the following commands from its folder.
+
+To run directly from source:
 
 ```powershell
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-See the [user guide](docs/USER-GUIDE.md) for step-by-step use and the [development guide](docs/DEVELOPMENT.md) for isolated testing and build checks.
+To build the Windows executable:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Build-GK2MT.ps1
+```
+
+The build writes **`dist\GK2MT.exe`** and includes Python, SSH support, and the interface assets. The target PC needs WebView2; Python and the source checkout are not needed alongside the EXE.
+
+See the [development guide](docs/DEVELOPMENT.md) for isolated testing and build checks.
+
+</details>
+
+See the [user guide](docs/USER-GUIDE.md) for everyday setup, installation, and troubleshooting.
 
 ## Nexus and Steam downloads
 
@@ -85,7 +100,7 @@ Unknown versions and ambiguous file variants are skipped by automatic updates. H
 
 Your Nexus website login and personal API connection are separate. Panel downloads use `%LOCALAPPDATA%\GK2MT\nexus-downloads`, independently of the bulk import folder. No shared API key is bundled.
 
-**Project status:** this is an open-source development preview. Public production distribution with Nexus integration requires registration under the [Nexus API policy](https://help.nexusmods.com/article/114-api-acceptable-use-policy); this project does not claim to be a registered Nexus application. See [research and integration notes](RESEARCH.md).
+**Project status:** this is an initial open-source preview release. Public production distribution with Nexus integration requires registration under the [Nexus API policy](https://help.nexusmods.com/article/114-api-acceptable-use-policy); this project does not claim to be a registered Nexus application. See [research and integration notes](RESEARCH.md).
 
 ## Profiles you can share
 
