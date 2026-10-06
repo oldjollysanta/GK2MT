@@ -118,7 +118,7 @@ def _normal(row):
     names = {PurePosixPath(str(path).replace('\\', '/').removesuffix(DISABLED)).name.casefold()
              for path in row.get('paths', [])}
     names.update(item.get('name', '').casefold() for item in row.get('_profile_dlls', []) if isinstance(item, dict))
-    return (row.get('can_toggle') is not False and not names.intersection(LOADERS)
+    return (not row.get('foundation') and row.get('can_toggle') is not False and not names.intersection(LOADERS)
             and not (_source(row) == 'Nexus' and str(row.get('nexus_mod_id')) == '48'))
 
 

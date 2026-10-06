@@ -29,7 +29,7 @@ def setup(root):
         checks = app.dispatch('setup-check', {'workshop': '', 'import_folder': ''})
         assert checks['game']['status'] == 'ready' and checks['game_found']
         assert checks['workshop']['path'] == str(workshop)
-        assert checks['workshop']['status'] == 'attention' and not checks['workshop_found']
+        assert checks['workshop']['status'] == 'empty' and not checks['workshop_found']
         assert checks['import_folder']['status'] == 'empty' and not checks['loader_installed']
         assert not app.DATA.exists() and not workshop.exists(), 'Read-only check wrote files.'
         app.dispatch('settings', {'game': str(game), 'workshop': '', 'import_folder': ''})
@@ -48,13 +48,13 @@ def setup(root):
         assert app.snapshot()['quick_setup_completed'] is True
         app.dispatch('settings', {'game': str(game), 'quick_setup_completed': False})
         assert app.settings()['quick_setup_completed'], 'Saving unchanged directories reset completion.'
-        workshop.mkdir(parents=True)
         rejects(lambda: app.dispatch('quick-setup-complete', {'workshop_enabled': True}))
         loader = game / app.integrations.WORKSHOP_TARGET
         loader.parent.mkdir(parents=True)
         loader.write_bytes(pe_dll())
         app.dispatch('quick-setup-complete', {'workshop_enabled': True})
         assert app.settings()['workshop_enabled']
+        assert not workshop.exists(), 'GitHub loader setup must not require a Steam download.'
         invalid = root / 'not-a-directory'
         invalid.write_text('inert marker')
         original = (app.DATA / 'settings.json').read_bytes()

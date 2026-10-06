@@ -1,5 +1,5 @@
 'use strict';
-let quickSetupCheck=null, quickSetupRevision=0, quickSetupTimer, quickWorkshopTimer, quickWorkshopWaiting=false, quickDeckTrust=null;
+let quickSetupCheck=null, quickSetupRevision=0, quickSetupTimer, quickDeckTrust=null;
 
 function quickPaths(){return {game:$('qs-game').value.trim(),workshop:$('qs-workshop').value.trim(),import_folder:$('qs-import').value.trim()};}
 function setupField(id,note,status,message){
@@ -23,16 +23,16 @@ function renderQuickSetup(){
   }
   setupBadge('qs-folders-status',game,game?'Game found':'Choose game folder');
   setupBadge('qs-support-status',bep && loader,bep && loader?'Ready':!bep?'Install BepInEx':'Finish Workshop setup');
-  $('qs-bep-message').textContent=bep?'Installed and detected.':'Required to load BepInEx mods. Existing files are backed up.';
-  $('qs-bep-install').hidden=bep;$('qs-bep-zip').hidden=bep;
+  $('qs-bep-message').textContent=bep?'Installed and detected. Your setup is kept.':'Install the pinned GitHub release. No account or API key is needed.';
+  $('qs-bep-install').hidden=bep;$('qs-bep-advanced').hidden=bep;
   $('qs-bep-install').disabled=!game;$('qs-bep-zip').disabled=!game;
   $('qs-workshop-options').hidden=!workshop;
-  $('qs-workshop-message').textContent=check.workshop_setup?.message || 'Subscribe to the loader in Steam, then refresh. GK2MT copies it to the game’s patchers folder.';
+  $('qs-workshop-message').textContent=check.workshop_setup?.message || 'Install the pinned Workshop Loader from GitHub. Subscribe to gameplay mods in Steam afterward.';
   $('qs-workshop-message').classList.toggle('green',loader && workshop);
   const setup=check.workshop_setup || {};
-  $('qs-subscribe').hidden=setup.installed===true;$('qs-workshop-install').hidden=setup.installed===true;
-  $('qs-subscribe').disabled=!game || !bep;
-  $('qs-workshop-install').disabled=!game || !bep || ['blocked','disabled'].includes(setup.state);
+  $('qs-workshop-install').hidden=setup.installed===true || ['blocked','disabled'].includes(setup.state);
+  $('qs-workshop-install').disabled=!game || !bep || setup.can_install!==true;
+  $('qs-workshop-resolve').hidden=!game || !bep || !['blocked','disabled'].includes(setup.state);
   $('qs-nexus-options').hidden=!nexusSelected;$('qs-deck-options').hidden=!deckSelected;
   $('qs-nexus-remember-option').hidden=!$('qs-nexus-key').value.trim();
   $('qs-nexus-connect').disabled=!$('qs-nexus-key').value.trim();
@@ -79,7 +79,7 @@ async function openQuickSetup(){
   $('qs-deck-host').value=config.deck?.host || '';$('qs-deck-password').value='';
   $('qs-deck-remember').checked=state.deck_connection?.password_saved===true;
   $('qs-deck-note').textContent='Connect once to remember the address and find its Steam folders. Sync is reviewed separately in Steam Deck.';
-  $('qs-deck-trust').hidden=true;$('qs-bep-download').hidden=true;$('qs-error').hidden=true;
+  $('qs-deck-trust').hidden=true;$('qs-bep-download').hidden=true;$('qs-bep-advanced').open=false;$('qs-error').hidden=true;
   $('quick-setup').showModal();
   await checkQuickSetup();
   $('qs-folders').open=!quickSetupCheck?.game_found;
@@ -89,21 +89,6 @@ function clearQuickTrust(){
   if(quickDeckTrust)quickDeckTrust.password='';quickDeckTrust=null;$('qs-deck-trust').hidden=true;
 }
 function closeQuickSetup(){clearQuickTrust();$('quick-setup').close();focusAfterWork($('page-'+currentPage).querySelector('h1'));}
-function pollQuickWorkshop(){
-  clearTimeout(quickWorkshopTimer);
-  if(!quickWorkshopWaiting || !$('quick-setup').open || !$('qs-workshop-enabled').checked)return;
-  quickWorkshopTimer=setTimeout(async()=>{
-    if(working){pollQuickWorkshop();return;}
-    try{
-      await checkQuickSetup();
-      if(quickSetupCheck?.workshop_setup?.state==='ready'){
-        quickWorkshopWaiting=false;
-        await quickWork('Installing the downloaded Workshop loader…',()=>api('workshop-loader-setup',{}));
-      }else if(quickSetupCheck?.workshop_setup?.installed){quickWorkshopWaiting=false;}
-      else pollQuickWorkshop();
-    }catch(error){quickWorkshopWaiting=false;$('qs-error').textContent=error.message;$('qs-error').hidden=false;}
-  },3000);
-}
 async function connectQuickDeck(trusted=false){
   if(trusted && !quickDeckTrust)return;
   const saved=state.settings.deck || {};
@@ -130,7 +115,7 @@ async function connectQuickDeck(trusted=false){
 }
 $('quick-setup-open').onclick=()=>work('Checking your setup…',openQuickSetup);
 for(const id of ['quick-setup-close','qs-later'])$(id).onclick=closeQuickSetup;
-$('quick-setup').addEventListener('close',()=>{clearTimeout(quickSetupTimer);clearTimeout(quickWorkshopTimer);quickWorkshopWaiting=false;quickSetupRevision++;clearQuickTrust();$('qs-nexus-key').value='';$('qs-deck-password').value='';});
+$('quick-setup').addEventListener('close',()=>{clearTimeout(quickSetupTimer);quickSetupRevision++;clearQuickTrust();$('qs-nexus-key').value='';$('qs-deck-password').value='';});
 document.addEventListener('click',event=>{
   const button=event.target.closest('[data-qs-browse]');if(!button)return;
   quickWork('Choose a folder…',async()=>{const result=await api('browse',{kind:'folder'});if(result.path)$(button.dataset.qsBrowse).value=result.path;});
@@ -139,18 +124,18 @@ for(const id of ['qs-game','qs-workshop','qs-import'])$(id).addEventListener('in
   quickSetupRevision++;quickSetupCheck=null;renderQuickSetup();clearTimeout(quickSetupTimer);
   quickSetupTimer=setTimeout(()=>checkQuickSetup().catch(error=>{$('qs-error').textContent=error.message;$('qs-error').hidden=false;}),450);
 });
-for(const id of ['qs-workshop-enabled','qs-nexus-enabled','qs-deck-enabled'])$(id).addEventListener('change',()=>{renderQuickSetup();if(id==='qs-workshop-enabled')pollQuickWorkshop();if(id==='qs-deck-enabled' && !$(id).checked)clearQuickTrust();});
+for(const id of ['qs-workshop-enabled','qs-nexus-enabled','qs-deck-enabled'])$(id).addEventListener('change',()=>{renderQuickSetup();if(id==='qs-deck-enabled' && !$(id).checked)clearQuickTrust();});
 for(const id of ['qs-nexus-key','qs-deck-password','qs-deck-host'])$(id).addEventListener('input',()=>{if(id.startsWith('qs-deck'))clearQuickTrust();renderQuickSetup();});
 $('qs-detect').onclick=()=>quickWork('Finding Steam folders…',async()=>{const result=await api('discover',{});if(result.game)$('qs-game').value=result.game;if(result.workshop)$('qs-workshop').value=result.workshop;});
 $('qs-folders-save').onclick=()=>quickWork('Confirming folders…',async()=>{await saveQuickFolders();$('qs-folders').open=false;$('qs-support').open=true;});
-$('qs-bep-install').onclick=()=>quickWork('Preparing BepInEx…',async()=>{
+$('qs-bep-install').onclick=()=>quickWork('Downloading and installing missing BepInEx files from GitHub…',async()=>{
   await saveQuickFolders();const result=await api('setup',{});
-  if(result.requires_download){$('qs-bep-download-message').textContent=result.message || 'Choose the BepInEx bundle ZIP from Nexus #48.';$('qs-bep-download').hidden=false;}
-  else{$('qs-bep-download').hidden=true;toast('BepInEx installed. Original files backed up.');}
+  if(result.requires_download){$('qs-bep-download-message').textContent=result.message || 'Choose the BepInEx bundle ZIP from Nexus #48.';$('qs-bep-download').hidden=false;$('qs-bep-advanced').open=true;}
+  else{$('qs-bep-download').hidden=true;toast(result.message || 'BepInEx setup is ready.');}
 });
-$('qs-bep-zip').onclick=()=>quickWork('Choose the BepInEx bundle ZIP…',async()=>{const selected=await api('browse',{kind:'zip'});if(!selected.path)return;await saveQuickFolders();const result=await api('setup',{archive:selected.path});if(result.requires_download){$('qs-bep-download-message').textContent=result.message || 'Choose the complete BepInEx bundle ZIP from Nexus #48.';$('qs-bep-download').hidden=false;}else{$('qs-bep-download').hidden=true;toast('BepInEx installed. Original files backed up.');}});
-$('qs-subscribe').onclick=()=>quickWork('Opening the Workshop loader in Steam…',async()=>{await saveQuickFolders();await api('steam-workshop',{workshop_id:'3807346541'});quickWorkshopWaiting=true;pollQuickWorkshop();});
-$('qs-workshop-install').onclick=()=>quickWork('Checking Steam and installing the loader…',async()=>{await saveQuickFolders();const result=await api('workshop-loader-setup',{});quickWorkshopWaiting=!result.installed;pollQuickWorkshop();toast(result.message || 'Workshop setup checked.');});
+$('qs-bep-zip').onclick=()=>quickWork('Choose the Nexus BepInEx bundle ZIP…',async()=>{const selected=await api('browse',{kind:'zip'});if(!selected.path)return;await saveQuickFolders();const result=await api('setup',{archive:selected.path});if(result.requires_download){$('qs-bep-download-message').textContent=result.message || 'Choose the complete BepInEx bundle ZIP from Nexus #48.';$('qs-bep-download').hidden=false;}else{$('qs-bep-download').hidden=true;toast(result.message || 'BepInEx setup is ready.');}});
+$('qs-workshop-install').onclick=()=>quickWork('Downloading and installing Workshop Loader from GitHub…',async()=>{await saveQuickFolders();const result=await api('workshop-loader-setup',{});toast(result.message || 'Workshop Loader setup checked.');});
+$('qs-workshop-resolve').onclick=()=>{closeQuickSetup();page('mods');};
 $('qs-nexus-connect').onclick=()=>quickWork('Validating the Nexus key…',async()=>{const key=$('qs-nexus-key').value.trim(),remember_key=$('qs-nexus-remember').checked;if(!key)throw new Error('Paste a Nexus key, or leave Nexus unchecked.');$('qs-nexus-key').value='';await api('nexus-connect',{key,remember_key});});
 $('qs-deck-connect').onclick=()=>connectQuickDeck();
 $('qs-deck-trust-confirm').onclick=()=>connectQuickDeck(true);

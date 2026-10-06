@@ -1,4 +1,4 @@
-# GK2 modding research — 29 September 2026
+# GK2 modding research
 
 Graveyard Keeper 2 uses Steam app **4358690**. Current BepInEx mods target **BepInEx 5.4.23.5, Windows x64, Unity Mono**. Merge the BepInEx package beside `GraveyardKeeper2.exe`; code plugins normally belong under `BepInEx/plugins`. BepInEx scans plugins recursively, so a disabled plugin must leave that tree or lose its `.dll` extension. Other mod systems and custom game-folder installers exist; a random DLL is not automatically a BepInEx plugin.
 
@@ -8,9 +8,11 @@ Graveyard Keeper 2 uses Steam app **4358690**. Current BepInEx mods target **Bep
 
 ## Current foundation and Workshop loader
 
-[BepInEx for Graveyard Keeper 2, Nexus #48](https://www.nexusmods.com/graveyardkeeper2/mods/48) is the selected foundation. Bundle version **1.1** includes BepInEx **5.4.23.5-1**, Unity Doorstop **4.5.0**, and Configuration Manager **19.0**. Its ZIP root belongs beside `GraveyardKeeper2.exe`, including `winhttp.dll`, `doorstop_config.ini`, `.doorstop_version`, and `BepInEx`. The Workshop auto-loader is installed separately.
+Default setup downloads pinned upstream GitHub assets: [BepInEx 5.4.23.5, Windows x64](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5), [Configuration Manager 19.0, BepInEx 5 variant](https://github.com/BepInEx/BepInEx.ConfigurationManager/releases/tag/v19.0), and [GK2 Workshop Loader 1.0.0](https://github.com/Zoriten/-GK2-WorkshopLoader/releases/tag/v1.0.0). These downloads need no Nexus account, Premium subscription, API key, or Steam loader subscription. The installer checks for existing components and keeps detected installations; a disabled or conflicting loader requires explicit resolution. It does not run the old GitHub installer executable. The Workshop content folder may be absent until Steam downloads gameplay mods.
 
-GK2MT downloads this bundle through Nexus with a Premium API key, or accepts the downloaded ZIP. It validates the foundation layout, preserves existing configs and separate Workshop patchers, backs up existing files, and uses atomic replacements. It no longer runs the old GitHub installer. Foundation archives use the setup flow rather than generic mod import. Nexus update checks compare the bundle's package version separately from a component's version.
+Upstream release assets are downloaded during setup rather than embedded or redistributed with GK2MT. Archive license notices are retained. BepInEx and Workshop Loader are MIT, Doorstop is LGPL-2.1, and Configuration Manager is LGPL-3.0; see [third-party notices](THIRD-PARTY-NOTICES.md).
+
+The complete [Nexus #48 BepInEx bundle](https://www.nexusmods.com/graveyardkeeper2/mods/48) remains an advanced, user-selected ZIP alternative. Bundle version **1.1** contains BepInEx **5.4.23.5-1**, Unity Doorstop **4.5.0**, and Configuration Manager **19.0**. Its root belongs beside `GraveyardKeeper2.exe`. This explicit operation can replace foundation files, preserving configs and separate Workshop patchers, with backups and atomic replacements. Installing a local ZIP requires no Nexus key. Existing Nexus foundation metadata and verified update handling remain separate from the GitHub setup. Foundation archives use the setup flow rather than generic mod import; Nexus checks compare the bundle's package version separately from component versions.
 
 Local files and the latest game log confirm the active patcher is `BepInEx/patchers/GK2_WorkshopLoader.dll`. It supports loose and nested BepInEx plugins and stages approved items under `BepInEx/plugins/_Workshop`. The trust file `BepInEx/config/GK2_WorkshopLoader.trust.txt` uses `ItemID = SHA256` or `ItemID = BLOCKED`. GK2MT disables an item with `BLOCKED`; enabling removes the block so the loader can request consent again. It never generates approval hashes. The loader owns the staged copies; do not install another copy of the same plugin manually.
 

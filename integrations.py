@@ -1,4 +1,4 @@
-"""User-initiated Nexus updates and Nexus mod 48 BepInEx setup."""
+"""User-initiated Nexus updates and verified, missing-only GitHub setup."""
 import hashlib
 import json
 import os
@@ -17,8 +17,8 @@ API = 'https://api.nexusmods.com/v1'
 GAME = 'graveyardkeeper2'
 SETUP_MOD = 48
 SETUP_URL = f'https://www.nexusmods.com/{GAME}/mods/{SETUP_MOD}?tab=files'
-HEADERS = {'User-Agent': 'GK2MT/0.1.1', 'Application-Name': 'GK2MT',
-           'Application-Version': '0.1.1', 'Accept': 'application/json'}
+HEADERS = {'User-Agent': 'GK2MT/0.1.2', 'Application-Name': 'GK2MT',
+           'Application-Version': '0.1.2', 'Accept': 'application/json'}
 ROOT_FILES = {'winhttp.dll', 'doorstop_config.ini', '.doorstop_version', 'changelog.txt'}
 REQUIRED = ['winhttp.dll', 'doorstop_config.ini', '.doorstop_version',
             'BepInEx/plugins/ConfigurationManager/ConfigurationManager.dll'] + [
@@ -31,6 +31,22 @@ WORKSHOP_ID = '3807346541'
 WORKSHOP_TARGET = 'BepInEx/patchers/GK2_WorkshopLoader.dll'
 WORKSHOP_BEPINEX_FILES = ('BepInEx/core/BepInEx.dll', 'BepInEx/core/BepInEx.Preloader.dll',
                          'winhttp.dll', 'doorstop_config.ini')
+GITHUB_DOMAINS = ('github.com', 'githubusercontent.com')
+BEPINEX_ASSET = ('https://github.com/BepInEx/BepInEx/releases/download/v5.4.23.5/'
+                 'BepInEx_win_x64_5.4.23.5.zip',
+                 '82f9878551030f54657792c0740d9d51a09500eeae1fba21106b0c441e6732c4')
+CONFIGURATION_ASSET = ('https://github.com/BepInEx/BepInEx.ConfigurationManager/releases/download/v19.0/'
+                       'BepInEx.ConfigurationManager_BepInEx5_v19.0.zip',
+                       'eed83f6e6accbdd0c3771f3061a6ae05b979b9b9b8a00dead69aabc1bf5fe950')
+WORKSHOP_ASSET = ('https://github.com/Zoriten/-GK2-WorkshopLoader/releases/download/v1.0.0/'
+                  'GK2_WorkshopLoader.dll',
+                  'd35b54d52324b52b2a7fb811ce5a4c982ef28ca8ab1bc3c28163b4ac689a4d8b')
+BEPINEX_UPSTREAM_FILES = (set(ROOT_FILES) | {name for name in REQUIRED if name.startswith('BepInEx/core/')} | {
+    'BepInEx/core/' + name for name in ('0Harmony.xml', 'BepInEx.Harmony.xml', 'BepInEx.Preloader.xml',
+                                     'BepInEx.xml', 'MonoMod.RuntimeDetour.xml', 'MonoMod.Utils.xml')})
+CONFIGURATION_FILES = {'BepInEx/plugins/ConfigurationManager/' + name for name in
+                       ('ConfigurationManager.dll', 'ConfigurationManager.xml',
+                        'ConfigurationManagerAttributes.cs', 'LICENSE', 'README.md')}
 
 
 def _workshop_dll(path):
@@ -68,16 +84,41 @@ def _workshop_dll(path):
                 raise ValueError('The Workshop DLL payload is incomplete.')
 
 
+def _recognized_loaders(game, names=None):
+    import inventory
+    names = inventory.LOADERS if names is None else names
+    copies, count = [], 0
+    def unreadable(error):
+        raise ValueError('The plugin or patcher tree cannot be read safely. Review it before loader setup.') from error
+    for area in ('patchers', 'plugins'):
+        root = game / 'BepInEx' / area
+        if not inventory._safe(root, game):
+            raise ValueError('A plugin or patcher folder contains a link. Review it before loader setup.')
+        if not root.exists():
+            continue
+        for base, dirs, files in os.walk(root, followlinks=False, onerror=unreadable):
+            count += len(dirs) + len(files)
+            if count > 20000 or any(inventory._linked(Path(base) / name) for name in dirs):
+                raise ValueError('The plugin or patcher tree is linked or too large to verify safely.')
+            for name in files:
+                if name.casefold().removesuffix(inventory.DISABLED) in names:
+                    path = Path(base) / name
+                    if not inventory._safe(path, game):
+                        raise ValueError('A Workshop loader contains a linked path. Review it before setup.')
+                    copies.append(path)
+    return copies
+
+
 def workshop_loader_setup(game, workshop, data_dir, install=False):
-    """Copy the subscribed loader once; never execute an installer or alter consent/configs."""
+    """Install the pinned loader only when no recognized active or disabled copy exists."""
     import inventory
     from manager import copy_atomic, digest, ensure_game_stopped, safe_path
 
     game, workshop = Path(game).absolute(), Path(workshop).absolute()
-    source = workshop / WORKSHOP_ID / WORKSHOP_TARGET
     target = game / WORKSHOP_TARGET
     status = {'state': 'blocked', 'installed': False, 'can_install': False, 'workshop_id': WORKSHOP_ID,
-              'message': '', 'source_path': str(source), 'target_path': str(target), 'files': 0}
+              'message': '', 'source_path': WORKSHOP_ASSET[0], 'target_path': str(target), 'files': 0,
+              'source': 'GitHub', 'version': '1.0.0'}
     def result(state, message, **values):
         return status | {'state': state, 'message': message} | values
     if not inventory._safe(game, Path(game.anchor)) or (os.path.lexists(workshop)
@@ -93,38 +134,45 @@ def workshop_loader_setup(game, workshop, data_dir, install=False):
         return result('missing_bepinex', 'Install BepInEx first, then refresh the Workshop loader setup.')
     if not inventory._safe(target, game) or not inventory._safe(Path(str(target) + inventory.DISABLED), game):
         return result('blocked', 'The Workshop loader destination contains a linked path.')
-    loader = inventory.loader_info(game)
-    if loader['kind'] in ('legacy', 'conflict'):
-        return result('blocked', 'Disable the old or conflicting Workshop loader in My mods before setting up this loader.')
-    if loader['kind'] == 'workshop':
-        existing = safe_path(game, loader['path'])
+    # BepInEx recursively searches both areas. Preserve misplaced and disabled loaders too.
+    try:
+        recognized = _recognized_loaders(game)
+    except ValueError as error:
+        return result('blocked', str(error))
+    active = [p for p in recognized if not p.name.casefold().endswith(inventory.DISABLED)]
+    if len(active) > 1:
+        return result('blocked', 'Multiple Workshop loaders are installed. Review them in My mods before changing loaders.')
+    if active:
+        existing = safe_path(game, active[0].relative_to(game).as_posix())
+        if existing.relative_to(game).as_posix().casefold().startswith('bepinex/plugins/'):
+            return result('blocked', 'An existing Workshop loader is in the plugins folder and was preserved. '
+                          'Move it into BepInEx/patchers or resolve it in My mods before setup.', target_path=str(existing))
         try:
             _workshop_dll(existing)
         except (OSError, ValueError):
             return result('blocked', 'The installed Workshop loader is incomplete. Review it in My mods before replacing it.')
-        return result('installed', 'The Workshop loader is already installed.', installed=True,
-                      target_path=str(existing), hash=digest(existing))
-    disabled = [p for p in inventory._files(game / 'BepInEx/patchers')
-                if p.name.casefold() == Path(WORKSHOP_TARGET).name.casefold() + inventory.DISABLED]
+        checksum = digest(existing)
+        name = inventory.LOADERS[existing.name.casefold()][1]
+        return result('installed', name + ' is already installed and was preserved.', installed=True,
+                      target_path=str(existing), hash=checksum, source='Existing installation',
+                      version='1.0.0' if checksum == WORKSHOP_ASSET[1] else 'Unknown')
+    disabled = [p for p in recognized if p.name.casefold().endswith(inventory.DISABLED)]
     if disabled:
         return result('disabled', 'The Workshop loader is disabled. Enable it in My mods when you want to use it.')
     if os.path.lexists(target):
         return result('blocked', 'The loader destination already exists. Review that file before installing.')
-    if not inventory._safe(source, workshop):
-        if not os.path.lexists(workshop):
-            return result('waiting_workshop', 'Subscribe to the Workshop loader and wait for Steam to finish downloading, then refresh.')
-        return result('blocked', 'The Workshop loader download contains a linked or unsafe path.')
-    if not source.is_file():
-        return result('waiting_workshop', 'Subscribe to the Workshop loader and wait for Steam to finish downloading, then refresh.')
-    try:
-        _workshop_dll(source)
-    except (OSError, ValueError) as error:
-        return result('waiting_workshop', str(error) + ' Wait for Steam to finish or repair the download, then refresh.')
-    checksum = digest(source)
-    ready = result('ready', 'The Workshop loader is downloaded and ready to install.', can_install=True, hash=checksum)
+    checksum = WORKSHOP_ASSET[1]
+    ready = result('ready', 'Install Workshop Loader 1.0.0 from GitHub. No account or Steam subscription is needed for setup.',
+                   can_install=True, hash=checksum)
     if not install:
         return ready
     ensure_game_stopped()
+    source = _github_asset(data_dir, WORKSHOP_ASSET, maximum=64 * 1024 * 1024)
+    _workshop_dll(source)
+    # Downloads can take time. A newly installed/disabled loader must win this race.
+    recheck = workshop_loader_setup(game, workshop, data_dir)
+    if recheck['state'] != 'ready':
+        return recheck
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix='.gk2mt-workshop-', suffix='.tmp', dir=target.parent)
     os.close(descriptor)
@@ -135,9 +183,12 @@ def workshop_loader_setup(game, workshop, data_dir, install=False):
         _workshop_dll(temporary)
         if digest(temporary) != checksum or digest(source) != checksum:
             raise ValueError('The Workshop loader download changed while being copied. Refresh and try again.')
-        if (not inventory._safe(source, workshop) or not inventory._safe(target, game)
+        if (not inventory._safe(source, Path(data_dir).absolute()) or not inventory._safe(target, game)
                 or os.path.lexists(Path(str(target) + inventory.DISABLED))):
             raise ValueError('Workshop loader paths changed. Refresh before installing.')
+        recheck = workshop_loader_setup(game, workshop, data_dir)
+        if recheck['state'] != 'ready':
+            return recheck
         ensure_game_stopped()
         # Creating a hardlink publishes complete bytes atomically and cannot overwrite another file.
         os.link(temporary, target)
@@ -148,7 +199,7 @@ def workshop_loader_setup(game, workshop, data_dir, install=False):
                       installed=True, hash=checksum, files=1)
     except BaseException as error:
         if published:
-            if target.is_file() and os.path.samefile(target, temporary):
+            if target.is_file() and os.path.samefile(target, temporary) and digest(target) == checksum:
                 target.unlink()
             else:
                 raise RuntimeError('Loader setup stopped, but another program changed the new loader file. Review ' + str(target)) from error
@@ -455,7 +506,7 @@ def nexus_check(key: str, rows: list[dict], links: dict) -> dict:
     return result
 
 
-def _download(url, destination, domains, maximum=2 * 1024**3):
+def _download(url, destination, domains, maximum=2 * 1024**3, expected_sha256=None):
     if not _trusted_url(url, domains):
         raise ValueError('Download must use a trusted HTTPS host.')
     destination = Path(destination)
@@ -471,18 +522,34 @@ def _download(url, destination, domains, maximum=2 * 1024**3):
             if expected > maximum:
                 raise ValueError('Download exceeds the size limit.')
             count = 0
+            checksum = hashlib.sha256()
             while chunk := response.read(1024 * 1024):
                 count += len(chunk)
                 if count > maximum:
                     raise ValueError('Download exceeds the size limit.')
                 output.write(chunk)
+                checksum.update(chunk)
             if not count or (expected and count != expected):
                 raise ValueError('Download was empty or incomplete.')
+            if expected_sha256 and checksum.hexdigest() != expected_sha256:
+                raise ValueError('The GitHub download did not match its pinned SHA-256. Nothing was installed.')
+            output.flush()
+            os.fsync(output.fileno())
         os.replace(temporary, destination)
         return destination
     finally:
         if temporary and temporary.exists():
             temporary.unlink()
+
+
+def _github_asset(data_dir, asset, maximum=64 * 1024 * 1024):
+    """Reuse only verified cache bytes; publish a download after its hash is checked."""
+    from manager import digest, safe_path
+    url, checksum = asset
+    target = safe_path(Path(data_dir), 'downloads/upstream/' + checksum + '-' + url.rsplit('/', 1)[-1])
+    if target.is_file() and 0 < target.stat().st_size <= maximum and digest(target) == checksum:
+        return target
+    return _download(url, target, GITHUB_DOMAINS, maximum=maximum, expected_sha256=checksum)
 
 
 def nexus_download(key, mod_id, file_id, destination: Path) -> Path:
@@ -563,13 +630,98 @@ def _target(game, relative):
     return target
 
 
+def _foundation_present(game):
+    return all((game / name).is_file() for name in WORKSHOP_BEPINEX_FILES)
+
+
+def _foundation_skip():
+    return {'requires_download': False, 'already_installed': True, 'installed': True, 'state': 'installed',
+            'files': 0, 'message': 'BepInEx is already installed. Its files and settings were preserved.'}
+
+
+def _github_setup(game, data_dir, dry_run=False):
+    import inventory
+    from manager import copy_atomic, digest, ensure_game_stopped, safe_extract, safe_path
+    if _foundation_present(game):
+        return _foundation_skip()
+    for relative in BEPINEX_UPSTREAM_FILES:
+        if relative.endswith('.dll') and os.path.lexists(game / (relative + '.gk2mt-disabled')):
+            raise ValueError('A BepInEx runtime file is disabled: ' + relative +
+                             '. Enable the existing installation or review an explicit repair ZIP; it was preserved.')
+    if not inventory._safe(game, Path(game.anchor)):
+        raise ValueError('Choose the physical game folder; linked folders cannot be used for setup.')
+    components = [
+        {'name': 'BepInEx', 'version': '5.4.23.5', 'url': BEPINEX_ASSET[0], 'sha256': BEPINEX_ASSET[1],
+         'source_url': 'https://github.com/BepInEx/BepInEx/tree/v5.4.23.5',
+         'license_url': 'https://github.com/BepInEx/BepInEx/blob/v5.4.23.5/LICENSE'},
+        {'name': 'Configuration Manager', 'version': '19.0.0', 'url': CONFIGURATION_ASSET[0],
+         'sha256': CONFIGURATION_ASSET[1],
+         'source_url': 'https://github.com/BepInEx/BepInEx.ConfigurationManager/tree/v19.0',
+         'license_url': 'https://github.com/BepInEx/BepInEx.ConfigurationManager/blob/v19.0/LICENSE'},
+        {'name': 'Unity Doorstop', 'version': '4.5.0', 'included_in': 'BepInEx',
+         'source_url': 'https://github.com/NeighTools/UnityDoorstop/tree/v4.5.0',
+         'license_url': 'https://github.com/NeighTools/UnityDoorstop/blob/v4.5.0/LICENSE'}]
+    _recognized_loaders(game, {'configurationmanager.dll'})  # Verify the existing plugin tree before downloads.
+    metadata = {'source': 'GitHub', 'url': BEPINEX_ASSET[0], 'components': components,
+                'package_version': '5.4.23.5'}
+    if dry_run:
+        return metadata | {'requires_download': False, 'state': 'ready', 'files': 0, 'can_install': True,
+                           'message': 'Install BepInEx 5.4.23.5 and Configuration Manager from GitHub. No account is needed.'}
+    ensure_game_stopped()
+    archives = [_github_asset(data_dir, asset) for asset in (BEPINEX_ASSET, CONFIGURATION_ASSET)]
+    if _foundation_present(game):
+        return _foundation_skip()
+    folder = data_dir / 'installer' / uuid.uuid4().hex
+    stage = folder / 'payload'
+    for index, (archive, asset, allowed) in enumerate(zip(archives, (BEPINEX_ASSET, CONFIGURATION_ASSET),
+                                                       (BEPINEX_UPSTREAM_FILES, CONFIGURATION_FILES))):
+        verified = folder / ('verified-' + str(index) + '.zip')
+        copy_atomic(archive, verified)
+        if digest(verified) != asset[1]:
+            raise ValueError('The GitHub cache changed or its SHA-256 is invalid. Nothing was installed.')
+        unpacked = folder / ('upstream-' + str(index))
+        safe_extract(verified, unpacked)
+        actual = {p.relative_to(unpacked).as_posix() for p in unpacked.rglob('*') if p.is_file()}
+        ignored = {'BepInEx/plugins/ConfigurationManager/ConfigurationManager.18.4.1.nupkg'} if index else set()
+        if actual != allowed | ignored:
+            raise ValueError('The pinned GitHub ZIP has an unexpected layout. Nothing was installed.')
+        for relative in sorted(allowed):
+            copy_atomic(unpacked / relative, stage / relative)
+    components[1]['preserved'] = bool(_recognized_loaders(game, {'configurationmanager.dll'}))
+    # The base release has no notice files. Keep its upstream/source/license references alongside
+    # the Configuration Manager LICENSE/README supplied by its official archive.
+    notice = stage / 'BepInEx/distribution/gk2mt-upstream.json'
+    notice.parent.mkdir(parents=True, exist_ok=True)
+    notice.write_text(json.dumps({'source': 'GitHub', 'components': components}, indent=2), encoding='utf-8')
+    files = []
+    for path in sorted(stage.rglob('*')):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(stage).as_posix()
+        target = safe_path(game, relative)
+        _target(game, Path(relative))
+        if relative.startswith('BepInEx/plugins/') and components[1]['preserved']:
+            continue
+        if target.exists():
+            if (relative == 'doorstop_config.ini' or relative.startswith(('BepInEx/config/', 'BepInEx/distribution/',
+                    'BepInEx/plugins/')) or digest(target) == digest(path)):
+                continue
+            raise ValueError('Existing BepInEx file differs: ' + relative +
+                             '. It was preserved. Review the installation or use an explicit BepInEx ZIP to repair it.')
+        files.append((path, Path(relative)))
+    return _deploy_foundation(game, data_dir, files, 'BepInEx 5.4.23.5', metadata, missing_only=True)
+
+
 def setup_installer(game: Path, data_dir: Path, key='', archive=None, file_id=None, dry_run=False) -> dict:
-    """Install the mod 48 foundation ZIP without running an installer or replacing loaders."""
+    """Use GitHub for missing-only setup; explicit Nexus files/ZIPs retain repair/update behaviour."""
     from manager import copy_atomic, digest, ensure_game_stopped, safe_extract
 
-    game, data_dir = Path(game).resolve(), Path(data_dir).resolve()
+    game, data_dir = Path(game).absolute(), Path(data_dir).absolute()
     if not all((game / name).is_file() for name in GAME_MARKERS):
         raise ValueError('Select the Graveyard Keeper 2 folder containing its executable and Unity game data.')
+    if archive is None and file_id is None:
+        return _github_setup(game, data_dir, dry_run=dry_run)
+    game, data_dir = game.resolve(), data_dir.resolve()
     version = 'Local Nexus mod 48 ZIP'
     package_version = 'Unknown'
     if archive:
@@ -629,6 +781,14 @@ def setup_installer(game: Path, data_dir: Path, key='', archive=None, file_id=No
                 and not (game / relative).exists() and (game / (relative + '.gk2mt-disabled')).is_file()):
             relative += '.gk2mt-disabled'
         files.append((path, Path(relative)))
+    metadata = {'source': 'Nexus', 'url': SETUP_URL, 'nexus_mod_id': SETUP_MOD, 'file_id': file_id,
+                'package_version': package_version}
+    return _deploy_foundation(game, data_dir, files, version, metadata, dry_run=dry_run)
+
+
+def _deploy_foundation(game, data_dir, files, version, metadata, dry_run=False, missing_only=False):
+    """Shared backup/rollback; missing-only setup publishes files exclusively without replacement."""
+    from manager import copy_atomic, digest, ensure_game_stopped, safe_path
     for path, relative in files:
         _target(game, relative)
     # Copy the entire existing setup before touching any real game file.
@@ -652,33 +812,77 @@ def setup_installer(game: Path, data_dir: Path, key='', archive=None, file_id=No
         target = backup / path.relative_to(game)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
-    manifest = {'game': str(game), 'release': version, 'nexus_mod_id': SETUP_MOD, 'file_id': file_id,
+    manifest = {'game': str(game), 'release': version, **metadata,
                 'files': [p.relative_to(game).as_posix() for p in existing],
                 'written': [relative.as_posix() for _, relative in files]}
     (backup / 'backup.json').write_text(json.dumps(manifest, indent=2), encoding='utf-8')
     written = []
+    new_files = {}
     installed_hashes = {}
     ensure_game_stopped()
+    if missing_only and _foundation_present(game):
+        return _foundation_skip()
     try:
         for path, relative in files:
             destination = _target(game, relative)
-            written.append(relative)
-            copy_atomic(path, destination)
+            if missing_only:
+                safe_path(game, relative)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, name = tempfile.mkstemp(prefix='.gk2mt-foundation-', dir=destination.parent)
+                os.close(descriptor)
+                temporary = Path(name)
+                try:
+                    copy_atomic(path, temporary)
+                    ensure_game_stopped()
+                    identity = temporary.stat()
+                    expected = digest(path)
+                    if relative.suffix.casefold() == '.dll' and os.path.lexists(Path(str(destination) + '.gk2mt-disabled')):
+                        raise ValueError('A disabled copy appeared during setup: ' + str(relative) + '. It was preserved.')
+                    if (relative.name.casefold() == 'configurationmanager.dll'
+                            and _recognized_loaders(game, {'configurationmanager.dll'})):
+                        raise ValueError('An existing Configuration Manager appeared during setup. It was preserved; refresh and try again.')
+                    os.link(temporary, destination)
+                    written.append(relative)
+                    new_files[relative] = (identity.st_dev, identity.st_ino, expected)
+                    if digest(destination) != expected:
+                        raise ValueError('A new BepInEx file changed while being installed: ' + str(relative))
+                finally:
+                    temporary.unlink(missing_ok=True)
+            else:
+                written.append(relative)
+                copy_atomic(path, destination)
             if path.suffix.lower() not in ('.cfg', '.ini'):
                 installed_hashes[relative.as_posix()] = digest(destination)
+        if missing_only:
+            for relative, expected in new_files.items():
+                destination = safe_path(game, relative)
+                identity = destination.stat()
+                if ((identity.st_dev, identity.st_ino) != expected[:2] or digest(destination) != expected[2]
+                        or relative.suffix.casefold() == '.dll' and
+                        os.path.lexists(Path(str(destination) + '.gk2mt-disabled'))):
+                    raise ValueError('A setup file changed or was disabled before setup finished: ' + str(relative))
     except Exception as error:
         failed = []
         for relative in reversed(written):
             try:
                 destination = _target(game, relative)
-                if (backup / relative).is_file():
+                if missing_only:
+                    safe_path(game, relative)
+                    identity = destination.stat() if destination.is_file() else None
+                    expected = new_files[relative]
+                    if (identity and (identity.st_dev, identity.st_ino) == expected[:2]
+                            and digest(destination) == expected[2]):
+                        destination.unlink()
+                    elif os.path.lexists(destination):
+                        failed.append(str(relative) + ' changed by another program; preserved')
+                elif (backup / relative).is_file():
                     copy_atomic(backup / relative, destination)
                 else:
                     destination.unlink(missing_ok=True)
             except (OSError, ValueError):
                 failed.append(str(relative))
         raise RuntimeError(f'Setup failed; backup: {backup}. Restore failures: {failed}. {error}') from error
-    return {'requires_download': False, 'version': version, 'backup': str(backup), 'files': len(files),
-            'url': SETUP_URL, 'nexus_mod_id': SETUP_MOD, 'file_id': file_id,
-            'package_version': package_version, 'installed_hashes': installed_hashes,
-            'message': 'BepInEx, Unity Doorstop and Configuration Manager installed from Nexus mod 48. Your Workshop loader, other mods and existing configs were preserved; a backup was saved.'}
+    return {'requires_download': False, 'state': 'installed', 'installed': True, 'version': version,
+            'backup': str(backup), 'files': len(files), **metadata, 'installed_hashes': installed_hashes,
+            'message': 'BepInEx foundation installed from ' + metadata['source'] +
+                       '. Existing Workshop loaders, other mods and configs were preserved; a backup was saved.'}

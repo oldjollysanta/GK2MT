@@ -254,9 +254,18 @@ def main():
                                           'source': 'GK2MT', 'paths': [component], 'version': '1.0', 'nexus_mod_id': 48})
             manager.save_json(lib.state_path, lib.state)
             with patch.object(integrations, 'setup_installer') as setup:
+                kept = app.dispatch('setup', {})
+                assert kept['already_installed'] and kept['files'] == 0
+                try:
+                    app.dispatch('setup', {'archive': str(foundation_zip)})
+                    raise AssertionError('Foundation package ownership must be protected')
+                except ValueError as error:
+                    assert 'imported package' in str(error)
+                setup.assert_not_called()
+                (game / 'winhttp.dll').unlink()
                 try:
                     app.dispatch('setup', {})
-                    raise AssertionError('Foundation package ownership must be protected')
+                    raise AssertionError('Missing foundation setup must still respect package ownership')
                 except ValueError as error:
                     assert 'imported package' in str(error)
                 setup.assert_not_called()

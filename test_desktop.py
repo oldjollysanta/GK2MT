@@ -1,4 +1,5 @@
 """Run the real WebView2 shell and setup workflows against an isolated fixture."""
+import hashlib
 import json
 from pathlib import Path
 import queue
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import app
 import desktop
 import webview
+from test_workshop_setup import pe_dll
 
 
 def main():
@@ -46,7 +48,7 @@ def main():
         if action == '__test_download_workshop_loader':
             from test_workshop_setup import pe_dll
             assert app.DATA == data and not loader_target.exists()
-            loader_source.parent.mkdir(parents=True)
+            loader_source.parent.mkdir(parents=True, exist_ok=True)
             loader_source.write_bytes(pe_dll())
             return {}
         if action == '__test_workshop_checkpoint':
@@ -84,7 +86,7 @@ def main():
         plugin = game / 'BepInEx/plugins/FixtureUninstall/Main.dll'
         preserved = plugin.parent / 'settings.cfg'
         loader_target = game / 'BepInEx/patchers/GK2_WorkshopLoader.dll'
-        loader_source = workshop / '3807346541/BepInEx/patchers/GK2_WorkshopLoader.dll'
+        loader_source = data / 'fixture-github-loader.dll'
         loader_config = game / 'BepInEx/config/GK2_WorkshopLoader.cfg'
         loader_trust = game / app.inventory.TRUST
         shared = game / 'BepInEx/plugins/Native/shared.json'
@@ -261,11 +263,10 @@ def main():
     await api('__test_prepare_workshop_setup', {});
     await refresh();
     document.querySelector('[data-page="settings"]').click();
-    check(state.loader_installed && state.workshop_setup.state === 'waiting_workshop' &&
+    check(state.loader_installed && state.workshop_setup.state === 'ready' &&
           !document.getElementById('workshop-setup-banner').hidden &&
           !document.getElementById('workshop-loader-install').hidden &&
-          !document.getElementById('workshop-loader-install').disabled &&
-          !document.getElementById('workshop-subscribe').hidden,
+          !document.getElementById('workshop-loader-install').disabled,
           'The first-run Workshop banner and actionable setup step were missing');
     const setupCard = document.getElementById('workshop-loader-install').closest('.card');
     setupCard.scrollIntoView({block: 'center'});
@@ -278,10 +279,9 @@ def main():
     await api('__test_download_workshop_loader', {});
     document.getElementById('workshop-loader-install').click();
     await waitUntil(() => !working && state.workshop_setup.installed && state.workshop_loader.kind === 'workshop',
-                    'Refresh & install did not copy and detect the downloaded Workshop loader');
+                    'GitHub installation did not copy and detect the downloaded Workshop loader');
     check(document.getElementById('workshop-setup-banner').hidden &&
           document.getElementById('workshop-loader-install').hidden &&
-          document.getElementById('workshop-subscribe').hidden &&
           state.mods.length === 1 && !state.duplicates.length &&
           document.getElementById('workshop-loader-status').textContent === state.workshop_setup.message,
           'The installed Workshop loader did not render a clean completed state');
@@ -363,6 +363,8 @@ def main():
         with patch.object(app, 'DATA', data), patch.object(app, 'dispatch', dispatch), \
                 patch.object(app.manager, 'ensure_game_stopped', fixture_game_stopped), \
                 patch.object(app.integrations, 'steam_workshop_titles', return_value={'3807346541': 'Fixture Workshop Loader'}), \
+                patch.object(app.integrations, '_github_asset', return_value=loader_source), \
+                patch.object(app.integrations, 'WORKSHOP_ASSET', ('https://github.com/fixture/loader.dll', hashlib.sha256(pe_dll()).hexdigest())), \
                 patch.object(webview.http, 'start_global_server', no_server), \
                 patch.object(webview.http, 'start_server', no_server), \
                 patch.object(socket.socket, 'bind', no_server):
@@ -377,8 +379,7 @@ def main():
         assert preserved.read_text(encoding='utf-8') == 'Personal fixture settings', 'Uninstall removed mod settings.'
         assert executable.read_bytes() == b'GK2MT test fixture; not an executable', 'Uninstall changed the game file.'
         assert untouched.read_text(encoding='utf-8') == 'Outside the mod folder', 'Uninstall changed an unrelated file.'
-        assert {path.relative_to(workshop).as_posix() for path in workshop.rglob('*') if path.is_file()} == {
-            '3807346541/BepInEx/patchers/GK2_WorkshopLoader.dll'}, 'Setup changed unexpected Workshop files.'
+        assert not list(workshop.rglob('*')), 'GitHub setup changed the Steam Workshop folder.'
         assert loader_target.read_bytes() == loader_source.read_bytes(), 'Setup did not copy the exact fixture loader.'
         assert app.manager.digest(loader_target) == setup_checkpoint['hash'] and loader_target.stat().st_mtime_ns == setup_checkpoint['mtime'], 'Repeated setup changed the installed loader.'
         assert loader_config.read_bytes() == b'Personal fixture loader config', 'Setup changed the user loader configuration.'

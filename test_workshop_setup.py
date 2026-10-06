@@ -1,4 +1,5 @@
-"""Offline Workshop loader setup checks; inert PE fixtures and temporary files only."""
+"""Offline missing-only loader checks; inert PE fixtures and temporary files only."""
+import hashlib
 import struct
 from io import BytesIO
 from pathlib import Path
@@ -7,11 +8,17 @@ from unittest.mock import patch
 
 import integrations
 import manager
-from test_manager import put
+from test_manager import put as put_text
+
+
+def put(root, relative, content='fixture'):
+    path = put_text(root, relative, content if isinstance(content, str) else '')
+    if isinstance(content, bytes):
+        path.write_bytes(content)
+    return path
 
 
 def pe_dll():
-    """A minimal inert PE32 DLL image for static validation; never executable test code."""
     data = bytearray(1024)
     data[:2] = b'MZ'
     struct.pack_into('<I', data, 60, 128)
@@ -25,18 +32,19 @@ def pe_dll():
     return bytes(data)
 
 
-def fixture(root, foundation=True, payload=True):
-    game, workshop, data = root / 'game', root / 'workshop', root / 'data'
-    put(game, 'GraveyardKeeper2.exe', 'test game')
-    workshop.mkdir()
+class Response(BytesIO):
+    def __init__(self, content):
+        super().__init__(content)
+        self.headers = {'Content-Length': str(len(content))}
+
+
+def fixture(root, foundation=True):
+    game, workshop, data = root / 'game', root / 'missing-workshop', root / 'data'
+    put(game, 'GraveyardKeeper2.exe', 'inert game')
     if foundation:
         for relative in integrations.WORKSHOP_BEPINEX_FILES:
             put(game, relative, 'foundation marker')
-    source = workshop / integrations.WORKSHOP_ID / integrations.WORKSHOP_TARGET
-    if payload:
-        source.parent.mkdir(parents=True)
-        source.write_bytes(pe_dll())
-    return game, workshop, data, source, game / integrations.WORKSHOP_TARGET
+    return game, workshop, data, game / integrations.WORKSHOP_TARGET
 
 
 def files(root):
@@ -46,172 +54,147 @@ def files(root):
 def rejects(action):
     try:
         action()
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
         return
     raise AssertionError('Unsafe loader setup succeeded.')
 
 
-def first_install_preserves_everything(root):
-    game, workshop, data, source, target = fixture(root)
+def first_install_and_missing_workshop(root, opener):
+    game, workshop, data, target = fixture(root)
     put(game, 'BepInEx/config/GK2_WorkshopLoader.trust.txt', '123 = BLOCKED # personal choice\n')
     put(game, 'BepInEx/plugins/Other.dll', 'unrelated plugin')
     before = files(game)
     status = integrations.workshop_loader_setup(game, workshop, data)
-    assert status['state'] == 'ready' and status['can_install'] and status['files'] == 0
-    assert status['hash'] == manager.digest(source) and files(game) == before and not data.exists()
+    assert status['state'] == 'ready' and status['can_install'] and status['source'] == 'GitHub'
+    assert status['hash'] == integrations.WORKSHOP_ASSET[1] and files(game) == before and not data.exists()
+    opener.open.assert_not_called()
     installed = integrations.workshop_loader_setup(game, workshop, data, install=True)
-    assert installed['state'] == 'installed' and installed['installed'] and installed['files'] == 1
-    assert target.read_bytes() == pe_dll() and manager.digest(target) == installed['hash']
-    assert {p: content for p, content in files(game).items() if p != integrations.WORKSHOP_TARGET} == before
-    # A changed Workshop release must never overwrite the already installed loader.
-    source.write_bytes(pe_dll() + b'another release')
+    assert installed['installed'] and installed['files'] == 1 and target.read_bytes() == pe_dll()
+    assert {p: b for p, b in files(game).items() if p != integrations.WORKSHOP_TARGET} == before
+    assert not workshop.exists() and opener.open.call_count == 1
     original = files(game)
     again = integrations.workshop_loader_setup(game, workshop, data, install=True)
-    assert again['state'] == 'installed' and again['files'] == 0 and files(game) == original
-    assert not list(target.parent.glob('.gk2mt-workshop-*')) and not data.exists()
+    assert again['installed'] and again['files'] == 0 and files(game) == original
+    assert opener.open.call_count == 1 and not list(target.parent.glob('.gk2mt-workshop-*'))
 
 
-def waiting_and_missing_foundation(root):
-    game, workshop, data, source, target = fixture(root, foundation=False)
-    before = files(game)
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'missing_bepinex'
-    assert files(game) == before
-    for relative in integrations.WORKSHOP_BEPINEX_FILES:
-        put(game, relative, 'foundation marker')
-    source.unlink()
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'waiting_workshop'
-    for bad in (b'', b'not a DLL', b'MZ' + b'\0' * 300, pe_dll()[:600]):
-        source.write_bytes(bad)
+def existing_loaders_are_preserved(root, opener):
+    game, workshop, data, target = fixture(root)
+    for relative in ('BepInEx/patchers/GK2.WorkshopAutoLoader.dll',
+                     'BepInEx/patchers/nested/GK2_WorkshopLoader.dll'):
+        existing = put(game, relative, pe_dll())
+        before = files(game)
         status = integrations.workshop_loader_setup(game, workshop, data, install=True)
-        assert status['state'] == 'waiting_workshop' and not status['can_install'] and not target.exists()
-    non_dll = bytearray(pe_dll())
-    struct.pack_into('<H', non_dll, 150, 0)
-    source.write_bytes(non_dll)
-    assert integrations.workshop_loader_setup(game, workshop, data)['state'] == 'waiting_workshop'
-    with source.open('wb') as stream:
-        stream.truncate(64 * 1024 * 1024 + 1)
-    assert integrations.workshop_loader_setup(game, workshop, data)['state'] == 'waiting_workshop'
-    source.write_bytes(pe_dll())
-    (game / 'GraveyardKeeper2.exe').unlink()
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
-    assert not target.exists()
-
-
-def existing_loaders_are_not_changed(root):
-    game, workshop, data, source, target = fixture(root)
-    legacy = put(game, 'BepInEx/patchers/GK2.WorkshopAutoLoader.dll', 'legacy loader')
-    before = files(game)
-    status = integrations.workshop_loader_setup(game, workshop, data, install=True)
-    assert status['state'] == 'blocked' and 'old or conflicting' in status['message'] and files(game) == before
-    target.write_bytes(pe_dll())
+        assert status['installed'] and status['files'] == 0 and files(game) == before
+        existing.unlink()
+    for relative in ('BepInEx/plugins/nested/GK2_WorkshopLoader.dll',
+                     'BepInEx/plugins/GK2.WorkshopAutoLoader.dll'):
+        existing = put(game, relative, pe_dll())
+        before = files(game)
+        status = integrations.workshop_loader_setup(game, workshop, data, install=True)
+        assert status['state'] == 'blocked' and not status['installed'] and 'Move it' in status['message']
+        assert files(game) == before
+        existing.unlink()
+    for relative in ('BepInEx/patchers/GK2.WorkshopAutoLoader.dll.gk2mt-disabled',
+                     'BepInEx/plugins/nested/GK2_WorkshopLoader.dll.gk2mt-disabled'):
+        existing = put(game, relative, pe_dll())
+        before = files(game)
+        assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'disabled'
+        assert files(game) == before
+        existing.unlink()
+    put(game, 'BepInEx/patchers/GK2.WorkshopAutoLoader.dll', pe_dll())
+    put(game, integrations.WORKSHOP_TARGET, pe_dll())
     before = files(game)
     assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
-    assert files(game) == before
-    legacy.unlink()
+    assert files(game) == before and not data.exists()
+    opener.open.assert_not_called()
+
+
+def cache_corrupt_download_and_missing_foundation(root, opener):
+    game, workshop, data, target = fixture(root, foundation=False)
+    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'missing_bepinex'
+    opener.open.assert_not_called()
+    for relative in integrations.WORKSHOP_BEPINEX_FILES:
+        put(game, relative, 'foundation')
+    cache = integrations._github_asset(data, integrations.WORKSHOP_ASSET)
+    assert opener.open.call_count == 1
+    integrations.workshop_loader_setup(game, workshop, data, install=True)
+    assert opener.open.call_count == 1
     target.unlink()
-    disabled = target.with_name(target.name + '.gk2mt-disabled')
-    disabled.write_bytes(pe_dll())
+    cache.write_bytes(b'corrupt cache')
+    integrations.workshop_loader_setup(game, workshop, data, install=True)
+    assert opener.open.call_count == 2 and target.read_bytes() == pe_dll()
+    target.unlink()
+    cache.unlink()
+    opener.open.side_effect = lambda *a, **kw: Response(pe_dll() + b'wrong version')
     before = files(game)
+    rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
+    assert files(game) == before and not cache.exists() and not list(cache.parent.glob('*.part'))
+
+
+def races_and_copy_failure(root, opener):
+    game, workshop, data, target = fixture(root)
+    def downloaded(*args, **kwargs):
+        put(game, 'BepInEx/plugins/GK2.WorkshopAutoLoader.dll.gk2mt-disabled', pe_dll())
+        return Response(pe_dll())
+    opener.open.side_effect = downloaded
     status = integrations.workshop_loader_setup(game, workshop, data, install=True)
-    assert status['state'] == 'disabled' and not status['can_install'] and files(game) == before
-    disabled.unlink()
-    nested = target.parent / 'OldDisabled' / disabled.name
-    nested.parent.mkdir()
-    nested.write_bytes(pe_dll())
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'disabled'
-    nested.unlink()
-    target.write_bytes(b'invalid installed loader')
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
-    assert target.read_bytes() == b'invalid installed loader'
-
-
-def truncated_download_reads_wait_for_steam(root):
-    game, workshop, data, source, target = fixture(root)
-    original_open, before = Path.open, files(game)
-    for length in (64, 24, 2, 40):
-        class Truncated(BytesIO):
-            def read(self, size=-1):
-                value = super().read(size)
-                return value[:-1] if size == length else value
-        def truncated_open(path, *args, **kwargs):
-            if path == source and args and args[0] == 'rb':
-                return Truncated(pe_dll())
-            return original_open(path, *args, **kwargs)
-        with patch.object(Path, 'open', truncated_open):
-            status = integrations.workshop_loader_setup(game, workshop, data, install=True)
-        assert status['state'] == 'waiting_workshop' and 'incomplete' in status['message']
-        assert files(game) == before and not target.exists()
-
-
-def running_and_failed_verification(root):
-    game, workshop, data, source, target = fixture(root)
+    assert status['state'] == 'disabled' and not target.exists()
+    (game / 'BepInEx/plugins/GK2.WorkshopAutoLoader.dll.gk2mt-disabled').unlink()
+    real_copy = manager.copy_atomic
+    def raced(src, dst):
+        real_copy(src, dst)
+        target.write_bytes(b'external manager file')
+    with patch.object(manager, 'copy_atomic', side_effect=raced):
+        assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
+    assert target.read_bytes() == b'external manager file'
+    target.unlink()
     before = files(game)
-    with patch.object(manager, 'ensure_game_stopped', side_effect=ValueError('Close Graveyard Keeper 2')):
+    with patch.object(manager, 'copy_atomic', side_effect=PermissionError('fixture locked path')):
         rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
-    assert files(game) == before and not target.exists()
-    digest = manager.digest
-    def bad_verification(path):
-        return '0' * 64 if Path(path) == target else digest(path)
-    with patch.object(manager, 'digest', side_effect=bad_verification):
-        rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
-    assert files(game) == before and not target.exists()
-    assert not list(target.parent.glob('.gk2mt-workshop-*'))
-    with patch.object(manager, 'copy_atomic', side_effect=PermissionError('simulated locked path')):
-        rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
-    assert files(game) == before and not target.exists()
+    assert files(game) == before and not list(target.parent.glob('.gk2mt-workshop-*'))
 
 
-def concurrent_destination_is_preserved(root):
-    game, workshop, data, source, target = fixture(root)
-    copy_atomic = manager.copy_atomic
-    def race_copy(src, destination):
-        copy_atomic(src, destination)
-        target.write_bytes(b'another manager created this file')
-    with patch.object(manager, 'copy_atomic', side_effect=race_copy):
-        rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
-    assert target.read_bytes() == b'another manager created this file'
-    assert not list(target.parent.glob('.gk2mt-workshop-*'))
-
-
-def linked_paths_rejected(root):
-    game, workshop, data, source, target = fixture(root)
-    outside = root / 'outside.dll'
-    outside.write_bytes(pe_dll())
-    source.unlink()
+def linked_noncanonical_loader_is_blocked(root, opener):
+    game, workshop, data, target = fixture(root)
+    outside = put(root, 'outside.dll', pe_dll())
+    linked = game / 'BepInEx/plugins/nested/GK2_WorkshopLoader.dll'
+    linked.parent.mkdir(parents=True)
     try:
-        source.symlink_to(outside)
+        linked.symlink_to(outside)
     except OSError:
-        print('SKIP symlinks unavailable on this Windows account')
+        print('SKIP symlinks unavailable')
         return
     assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
-    source.unlink()
-    source.write_bytes(pe_dll())
-    target.parent.mkdir(exist_ok=True)
-    target.symlink_to(outside)
+    assert outside.read_bytes() == pe_dll() and not target.exists() and not data.exists()
+    opener.open.assert_not_called()
+
+
+def invalid_existing_and_running_game(root, opener):
+    game, workshop, data, target = fixture(root)
+    put(game, integrations.WORKSHOP_TARGET, b'invalid existing loader')
+    before = files(game)
     assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
+    assert files(game) == before
     target.unlink()
-    foundation = game / integrations.WORKSHOP_BEPINEX_FILES[0]
-    foundation.unlink()
-    foundation.symlink_to(outside)
-    assert integrations.workshop_loader_setup(game, workshop, data, install=True)['state'] == 'blocked'
-    foundation.unlink()
-    foundation.write_bytes(b'foundation')
-    alias = root / 'game-alias'
-    alias.symlink_to(game, target_is_directory=True)
-    assert integrations.workshop_loader_setup(alias, workshop, data, install=True)['state'] == 'blocked'
-    alias = root / 'workshop-alias'
-    alias.symlink_to(workshop, target_is_directory=True)
-    assert integrations.workshop_loader_setup(game, alias, data, install=True)['state'] == 'blocked'
-    assert outside.read_bytes() == pe_dll() and not target.exists()
+    with patch.object(manager, 'ensure_game_stopped', side_effect=ValueError('Close the game')):
+        rejects(lambda: integrations.workshop_loader_setup(game, workshop, data, install=True))
+    opener.open.assert_not_called()
 
 
 def main():
-    with patch.object(manager, 'ensure_game_stopped'):
-        for check in (first_install_preserves_everything, waiting_and_missing_foundation,
-                      existing_loaders_are_not_changed, truncated_download_reads_wait_for_steam, running_and_failed_verification,
-                      concurrent_destination_is_preserved, linked_paths_rejected):
-            with TemporaryDirectory() as temporary:
-                check(Path(temporary))
+    checks = (first_install_and_missing_workshop, existing_loaders_are_preserved,
+              cache_corrupt_download_and_missing_foundation, races_and_copy_failure,
+              linked_noncanonical_loader_is_blocked, invalid_existing_and_running_game)
+    asset = (integrations.WORKSHOP_ASSET[0], hashlib.sha256(pe_dll()).hexdigest())
+    with patch.object(manager, 'ensure_game_stopped'), patch.object(integrations, 'WORKSHOP_ASSET', asset), \
+            patch.object(integrations, '_account', side_effect=AssertionError('No account calls')), \
+            patch.object(integrations, '_json', side_effect=AssertionError('No API calls')):
+        for check in checks:
+            with TemporaryDirectory() as temporary, patch.object(integrations.urllib.request, 'build_opener') as build:
+                opener = build.return_value
+                opener.open.side_effect = lambda *a, **kw: Response(pe_dll())
+                check(Path(temporary), opener)
                 print('PASS', check.__name__)
     print('Workshop setup checks passed; no live game files or credentials touched.')
 

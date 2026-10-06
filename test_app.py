@@ -684,33 +684,36 @@ def workshop_setup_actions():
     """First-run setup is explicit and cannot reclaim an imported package's loader."""
     from test_workshop_setup import fixture, files, pe_dll
     with TemporaryDirectory() as temporary:
-        game, workshop, data, source, target = fixture(Path(temporary), payload=False)
+        game, workshop, data, target = fixture(Path(temporary))
         config = {'game': str(game), 'workshop': str(workshop)}
         with patch.object(app, 'DATA', data), patch.object(app, 'DOWNLOADS', {}), \
              patch.object(app, 'PREVIEW', {'cached': True}), \
              patch.object(app, 'UPDATES', {'cached': True}), \
              patch.object(app, 'PROFILE_PREVIEW', {'cached': True}), \
              patch.object(app, 'NEXUS_KEY', ''), patch.object(app, 'DECK_SESSION', None), \
-             patch.object(manager, 'ensure_game_stopped'):
+             patch.object(manager, 'ensure_game_stopped'), \
+             patch.object(app.integrations, 'WORKSHOP_ASSET', ('https://github.com/fixture/loader.dll', hashlib.sha256(pe_dll()).hexdigest())), \
+             patch.object(app.integrations, '_github_asset', return_value=data / 'fixture-download.dll') as download:
             manager.save_json(data / 'settings.json', config)
             before = files(game)
-            assert app.snapshot()['workshop_setup']['state'] == 'waiting_workshop'
+            assert app.snapshot()['workshop_setup']['state'] == 'ready'
             assert files(game) == before, 'Reading setup status modified the game.'
-            waiting = app.dispatch('workshop-loader-setup', {})
-            assert waiting['state'] == 'waiting_workshop' and waiting['files'] == 0
+            download.assert_not_called()
             assert app.PREVIEW and app.UPDATES and app.PROFILE_PREVIEW
 
             library = app.package_manager(config)
             for field in ('paths', 'retired_paths', 'adopted_paths'):
-                library.state['packages'] = [{'name': 'Previously imported loader',
-                                              field: [app.integrations.WORKSHOP_TARGET]}]
-                manager.save_json(library.state_path, library.state)
-                blocked = app.workshop_setup(config, install=True)
-                assert blocked['state'] == 'blocked' and 'imported package' in blocked['message']
-                assert files(game) == before
-            source.parent.mkdir(parents=True)
-            source.write_bytes(pe_dll())
+                for relative in (app.integrations.WORKSHOP_TARGET,
+                                 'BepInEx/plugins/Other/GK2_WorkshopLoader.dll.gk2mt-disabled',
+                                 'BepInEx/patchers/Other/GK2.WorkshopAutoLoader.dll'):
+                    library.state['packages'] = [{'name': 'Previously imported loader', field: [relative]}]
+                    manager.save_json(library.state_path, library.state)
+                    blocked = app.workshop_setup(config, install=True)
+                    assert blocked['state'] == 'blocked' and 'imported package' in blocked['message']
+                    assert files(game) == before
+            (data / 'fixture-download.dll').write_bytes(pe_dll())
             assert app.workshop_setup(config, install=True)['state'] == 'blocked'
+            download.assert_not_called()
             assert not target.exists()
             library.state['packages'] = []
             manager.save_json(library.state_path, library.state)
@@ -731,7 +734,59 @@ def workshop_setup_actions():
             stamp = target.stat().st_mtime_ns
             assert app.dispatch('workshop-loader-setup', {})['files'] == 0
             assert target.stat().st_mtime_ns == stamp
+            assert download.call_count == 1, 'Detection should skip the second GitHub download.'
     print('Workshop first-run bridge passed: explicit install, managed ownership and download guards.')
+
+
+def github_foundation_actions():
+    with TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        game, data = root / 'game', root / 'data'
+        game.mkdir()
+        (game / 'GraveyardKeeper2.exe').touch()
+        config = {'game': str(game), 'workshop': str(root / 'workshop'), 'deck': {'host': '192.0.2.50'}}
+        with patch.object(app, 'DATA', data), patch.object(app, 'DECK_SESSION', None), \
+             patch.object(app, 'NEXUS_KEY', 'dummy-existing-key'), patch.object(app, 'UPDATES', None):
+            manager.save_json(data / 'settings.json', config)
+            library = app.package_manager(config)
+            for relative in app.BEPINEX_FILES:
+                path = game / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'Existing foundation')
+            tracking = library.data / 'foundation.json'
+            manager.save_json(tracking, {'existing': 'provenance must survive'})
+            before = {path: path.read_bytes() for base in (game, data) for path in base.rglob('*') if path.is_file()}
+            with patch.object(app.integrations, 'setup_installer') as installer, \
+                 patch.object(app.manager, 'ensure_game_stopped') as stopped, \
+                 patch.object(app, 'package_manager') as ownership:
+                result = app.dispatch('setup', {})
+                assert result['already_installed'] and result['files'] == 0
+                installer.assert_not_called()
+                stopped.assert_not_called()
+                ownership.assert_not_called()
+            assert {path: path.read_bytes() for base in (game, data) for path in base.rglob('*') if path.is_file()} == before
+            assert app.NEXUS_KEY == 'dummy-existing-key'
+            component = game / 'BepInEx/plugins/ConfigurationManager/ConfigurationManager.dll'
+            component.parent.mkdir(parents=True)
+            component.write_bytes(b'Verified fixture component')
+            installed = {'source': 'GitHub', 'files': 1, 'backup': '', 'package_version': '5.4.23.5',
+                         'components': [{'name': 'Configuration Manager', 'version': '19.0'}],
+                         'installed_hashes': {component.relative_to(game).as_posix(): manager.digest(component)}}
+            app.record_foundation(config, installed)
+            row = {'id': 'plugins:configurationmanager', 'name': 'Configuration Manager',
+                   'paths': [component.relative_to(game).as_posix()], 'enabled': True,
+                   'source': 'Vortex', 'nexus_mod_id': 48, 'file_id': 12, 'version': '1.1',
+                   'warnings': ["Vortex's recorded version is old."]}
+            with patch.object(app.inventory, 'scan', return_value=[row]):
+                current = app.snapshot()['mods'][0]
+            assert current['display_version'] == '19.0' and current['source'] == 'Manual'
+            assert current['setup_source'] == 'GitHub' and current['nexus_mod_id'] is None and current['file_id'] is None
+            assert not current['can_uninstall'] and not current['warnings']
+            assert not app.profiles.capture('Fixture', [current], game)['mods']
+            installed['components'][0]['preserved'] = True
+            app.record_foundation(config, installed)
+            assert app.foundation_metadata(library) == {}, 'Preserved older plugins must keep their own provenance.'
+    print('GitHub foundation bridge passed: detected skip preserves settings, honest component versions and profile protection.')
 
 
 def main():
@@ -739,6 +794,7 @@ def main():
     nexus_actions()
     workshop_actions()
     workshop_setup_actions()
+    github_foundation_actions()
     uninstall_actions()
     cached_update_actions()
     discovery_actions()

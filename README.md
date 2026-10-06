@@ -33,7 +33,7 @@ The desktop build runs as a single **GK2MT.exe** with its own window, native fil
 | **Quick Setup** | Detects Steam directories and checks BepInEx in a compact first-run dialog. Existing settings are filled in; Nexus and Deck setup unfold only when selected. |
 | **One mod library** | Shows **Steam**, **Nexus**, and **Manual** sources, published Workshop titles, versions, categories, enabled states, and search/filter controls. |
 | **Simple installation** | Drag and drop ZIPs, choose a ZIP, import a folder, or browse Nexus inside the app. Supported packages are checked before installation; identical repeat imports are skipped. |
-| **BepInEx & Workshop** | Sets up the supported BepInEx bundle and guides Workshop Loader subscription, download, and installation into the game's patchers folder. |
+| **BepInEx & Workshop** | Sets up missing BepInEx with Configuration Manager, and a missing Workshop Loader, from pinned GitHub releases. No account or API key is needed; detected installations stay unchanged. |
 | **Updates & changelogs** | Checks linked Nexus mods, shows the selected release's changelog, and downloads verified updates with backups. Free and Premium accounts have supported download paths. |
 | **Duplicate warnings** | Warns before installing another Steam/Nexus copy of a plugin, including disabled copies, and highlights existing duplicates. |
 | **File conflict review & rules** | Reviews all selected ZIPs together, names active and disabled copies, and requires a choice for differing shared files. Identical files stay shared. Installed package rules handle file overlaps; runtime mod compatibility still needs checking. |
@@ -53,11 +53,13 @@ The app uses **[Microsoft Edge WebView2 Runtime](https://developer.microsoft.com
 Quick Setup opens on first use and continues until completed:
 
 1. **Confirm directories.** GK2MT detects Steam libraries; select the game and Workshop folders if needed. The bulk ZIP folder defaults to `%USERPROFILE%\Downloads\GK2MT`.
-2. **Check mod support.** Existing BepInEx is recognized. For a new setup, install the [supported BepInEx bundle](https://www.nexusmods.com/graveyardkeeper2/mods/48) or select its downloaded ZIP. For Workshop mods, open the loader's Steam page, subscribe, wait for Steam, then choose **Refresh & install loader**.
+2. **Check mod support.** Existing BepInEx and Workshop Loader installations are kept. For a new setup, choose **Install BepInEx**, then **Install Workshop Loader** if using Workshop mods. These download directly from GitHub without a Nexus account, Premium subscription, API key, or loader subscription in Steam.
 3. **Connect optional services.** Add your own Nexus API key for metadata and verified downloads, or enter Deck connection details. Either can be configured later.
 4. **Finish setup and add mods.** Drop a supported ZIP onto the window, use **Install ZIP**, or open **Browse Nexus**.
 
 Close the game before installing, updating, uninstalling, or syncing mods. After setup, launch it to confirm loading and approve Workshop mods if the loader requests it.
+
+Setup pins [BepInEx 5.4.23.5](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5), [Configuration Manager 19.0 for BepInEx 5](https://github.com/BepInEx/BepInEx.ConfigurationManager/releases/tag/v19.0), and [GK2 Workshop Loader 1.0.0](https://github.com/Zoriten/-GK2-WorkshopLoader/releases/tag/v1.0.0). Upstream assets are downloaded during setup and are not bundled in GK2MT. Their license notices are retained; see [third-party notices](THIRD-PARTY-NOTICES.md). A downloaded Nexus #48 ZIP remains an explicit advanced replacement option with backups. Subscribe to gameplay mods in Steam afterward; Steam creates its Workshop folder when needed.
 
 <details>
 <summary><strong>Advanced setup (optional) — run from source or build your own EXE</strong></summary>

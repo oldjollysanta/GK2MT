@@ -393,21 +393,15 @@ def check():
                 if extra:
                     archive.writestr(extra, b'unexpected')
 
-        with patch.object(api, '_json') as request:
-            manual = api.setup_installer(game, data)
-            assert manual['requires_download'] and manual['nexus_mod_id'] == 48
-            assert '/mods/48' in manual['url'] and not data.exists()
+        with patch.object(api, '_json') as request, patch.object(api, '_account') as account, \
+                patch.object(api, '_github_asset') as download:
+            for key in ('', 'test-key'):
+                preview = api.setup_installer(game, data, key=key, dry_run=True)
+                assert preview['state'] == 'ready' and preview['source'] == 'GitHub'
+                assert 'nexus_mod_id' not in preview and not data.exists()
             request.assert_not_called()
-        with patch.object(api, '_account', return_value={'name': 'Test', 'premium': False}), \
-                patch.object(api, 'nexus_download') as download:
-            assert api.setup_installer(game, data, key='test-key')['requires_download']
+            account.assert_not_called()
             download.assert_not_called()
-        with patch.object(api, '_account', return_value={'name': 'Test', 'premium': True}), \
-                patch.object(api, '_json', return_value=payload), patch.object(api, 'nexus_download') as download:
-            manual = api.setup_installer(game, data, key='test-key')
-            assert manual['requires_download'] and len(manual['choices']) == 2
-            download.assert_not_called()
-
         bundle()
         with patch.object(api, '_json') as request, patch('manager.ensure_game_stopped'):
             installed = api.setup_installer(game, data, archive=package)
@@ -433,7 +427,7 @@ def check():
                 patch.object(api, '_json', return_value={'files': [files[1]]}), \
                 patch.object(api, 'nexus_download', return_value=package) as download, \
                 patch('manager.ensure_game_stopped'):
-            installed = api.setup_installer(game, data, key='test-key')
+            installed = api.setup_installer(game, data, key='test-key', file_id=2)
             assert installed['version'] == '2.0' and installed['file_id'] == 2
             assert installed['package_version'] == '2.0'
             download.assert_called_once_with('test-key', 48, 2, data / 'downloads')

@@ -2,8 +2,8 @@
 'use strict';
 const assert=require('node:assert/strict'), fs=require('node:fs'), vm=require('node:vm');
 const html=fs.readFileSync('web/index.html','utf8'), source=fs.readFileSync('web/setup.js','utf8');
-const nodes=new Map(), requests=[], messages=[], timers=new Map();
-let timer=0, checkResult, setupResult={requires_download:false}, selectedZip='C:\\fixtures\\BepInEx.zip';
+const nodes=new Map(), requests=[], messages=[], timers=new Map(), pages=[];
+let timer=0, checkResult, setupResult={requires_download:false,files:0,message:'Detected BepInEx kept.'}, setupFailure, workshopFailure, selectedZip='C:\\fixtures\\BepInEx.zip';
 function $(id){
   if(!nodes.has(id)){
     const classes=new Set(), listeners=new Map();let value='';
@@ -25,14 +25,19 @@ const context=vm.createContext({$,state,working:false,currentPage:'mods',
   toast:(message,error)=>messages.push({message,error}),
   focusAfterWork:element=>{element.tabIndex=-1;element.focus({preventScroll:true});},
   setTimeout(callback){timers.set(++timer,callback);return timer;},clearTimeout(id){timers.delete(id);},
-  work:async(_,task)=>task(),refresh:async()=>{},page:()=>{},stagePaths:async()=>{},
+  work:async(_,task)=>task(),refresh:async()=>{},page:name=>pages.push(name),stagePaths:async()=>{},
   api:async(action,body)=>{
     requests.push([action,JSON.parse(JSON.stringify(body))]);
     if(action==='setup-check')return checkResult;
     if(action==='settings'){Object.assign(state.settings,body);return {};}
-    if(action==='quick-setup-complete'){state.quick_setup_completed=true;state.settings.quick_setup_completed=true;return {};}
+    if(action==='quick-setup-complete'){state.quick_setup_completed=true;state.settings.quick_setup_completed=true;state.settings.workshop_enabled=body.workshop_enabled;return {};}
     if(action==='browse')return {path:selectedZip};
-    if(action==='setup')return setupResult;
+    if(action==='setup'){if(setupFailure)throw setupFailure;if(!setupResult.requires_download && setupResult.files)checkResult={...checkResult,loader_installed:true};return setupResult;}
+    if(action==='workshop-loader-setup'){
+      if(workshopFailure)throw workshopFailure;
+      if(checkResult.workshop_setup.state==='ready')checkResult={...checkResult,workshop_setup:{installed:true,state:'installed',can_install:false,message:'Workshop Loader installed from GitHub. Your existing settings are kept.'}};
+      return checkResult.workshop_setup;
+    }
     if(action==='nexus-connect'){
       assert.equal($('qs-nexus-key').value,'','Do not retain a submitted plaintext key in the input.');
       state.nexus_connected=true;state.nexus_saved=body.remember_key===true;return {};
@@ -98,6 +103,8 @@ async function main(){
   assert.equal($('qs-deck-options').hidden,true);
   assert.equal($('qs-deck-remember').checked,true);
   assert.equal($('qs-finish').disabled,false);
+  assert.equal($('qs-bep-install').hidden,true);assert.equal($('qs-bep-advanced').hidden,true,'detected BepInEx does not offer replacement in first-run setup');
+  assert.equal($('qs-workshop-install').hidden,true,'detected Workshop Loader is kept');
   assert.deepEqual(requests.map(([action])=>action),['setup-check']);
   assert.equal(state.nexus_saved,true);assert.equal(state.deck_connection.password_saved,true);
 
@@ -131,7 +138,7 @@ async function main(){
   let count=requests.filter(([action])=>action==='quick-setup-complete').length;
   await assert.rejects($('qs-finish').onclick(),/Install BepInEx/);
   assert.equal(requests.filter(([action])=>action==='quick-setup-complete').length,count);
-  checkResult=ready({workshop_setup:{installed:false,state:'waiting_workshop'}});
+  checkResult=ready({workshop_setup:{installed:false,state:'ready',can_install:true,source:'GitHub'}});
   await run('checkQuickSetup()');assert.equal($('qs-finish').disabled,true);
   $('qs-workshop-enabled').checked=false;$('qs-workshop-enabled').emit('change');
   assert.equal($('qs-workshop-options').hidden,true);assert.equal($('qs-finish').disabled,false);
@@ -147,18 +154,54 @@ async function main(){
   const successBefore=messages.filter(({message})=>message.includes('BepInEx installed')).length;
   await $('qs-bep-install').onclick();
   assert.equal($('qs-bep-download').hidden,false);assert.match($('qs-bep-download-message').textContent,/matching MAIN/);
+  assert.equal($('qs-bep-advanced').open,true,'an unexpected fallback result reveals the advanced alternative');
   await $('qs-bep-zip').onclick();
   assert.equal($('qs-bep-download').hidden,false);
   assert.equal(messages.filter(({message})=>message.includes('BepInEx installed')).length,successBefore);
   assert.equal($('qs-finish').disabled,true);
-  setupResult={requires_download:false};await $('qs-bep-zip').onclick();
+  setupResult={requires_download:false,files:3,message:'BepInEx installed from the selected Nexus ZIP.'};await $('qs-bep-zip').onclick();
   assert.equal($('qs-bep-download').hidden,true);
   assert.equal(messages.filter(({message})=>message.includes('BepInEx installed')).length,successBefore+1);
+  assert.equal($('qs-bep-advanced').hidden,true,'the ZIP alternative folds away once installation is detected');
+
+  // Fresh setup downloads missing components without Nexus, Steam loader subscription,
+  // or an already-created Workshop content folder. Failure leaves a normal retry.
+  state.nexus_connected=false;state.settings.workshop_enabled=true;
+  checkResult=ready({loader_installed:false,workshop_found:false,
+    workshop:{path:state.settings.workshop,status:'attention',valid:false,message:'Steam will create this folder after your first Workshop download.'},
+    workshop_setup:{installed:false,state:'missing_bepinex',can_install:false,source:'GitHub'}});
+  await run('openQuickSetup()');assert.equal($('qs-nexus-enabled').checked,false);
+  assert.equal($('qs-bep-install').disabled,false);assert.equal($('qs-workshop-install').disabled,true);
+  const foundationStart=requests.length;setupFailure=Error('GitHub download unavailable. Try again.');
+  await assert.rejects($('qs-bep-install').onclick(),/GitHub download unavailable/);
+  assert.equal($('qs-error').hidden,false);assert.equal($('qs-bep-install').disabled,false);assert.equal($('qs-finish').disabled,true);
+  setupFailure=null;setupResult={requires_download:false,files:12,message:'BepInEx installed from GitHub. Existing files kept.'};
+  checkResult.workshop_setup={installed:false,state:'ready',can_install:true,source:'GitHub',message:'Workshop Loader is ready to download from GitHub.'};
+  await $('qs-bep-install').onclick();
+  assert.equal($('qs-error').hidden,true);assert.equal($('qs-bep-install').hidden,true);assert.equal($('qs-workshop-install').disabled,false);
+  assert.deepEqual(requests.filter(([action])=>action==='setup').at(-1)[1],{},'the default setup does not send an archive, file ID or Nexus key');
+  assert.ok(requests.slice(foundationStart).every(([action])=>['setup-check','settings','setup'].includes(action)),'account-free foundation setup never opens Nexus or connects an account');
+  const workshopStart=requests.length;workshopFailure=Error('Workshop Loader download failed. Try again.');
+  await assert.rejects($('qs-workshop-install').onclick(),/download failed/);
+  assert.equal($('qs-error').hidden,false);assert.equal($('qs-workshop-install').disabled,false);assert.equal($('qs-finish').disabled,true);
+  workshopFailure=null;await $('qs-workshop-install').onclick();
+  assert.equal($('qs-error').hidden,true);assert.equal($('qs-workshop-install').hidden,true);assert.equal($('qs-finish').disabled,false,'missing Steam content folder does not block installed mod support');
+  assert.ok(requests.slice(workshopStart).every(([action])=>['setup-check','settings','workshop-loader-setup'].includes(action)),'loader setup does not subscribe, open Steam or poll for a Workshop download');
+  assert.equal(timers.size,0,'no obsolete loader download poll remains');
+  await $('qs-finish').onclick();assert.equal(state.settings.workshop_enabled,true);assert.equal($('quick-setup').open,false);
+  for(const blockedState of ['disabled','blocked']){
+    checkResult=ready({workshop_setup:{installed:false,state:blockedState,can_install:false,message:'Resolve the existing loader in My mods.'}});
+    const beforeOpen=requests.length;await run('openQuickSetup()');
+    assert.equal($('qs-workshop-install').hidden,true);assert.equal($('qs-workshop-resolve').hidden,false);assert.equal($('qs-finish').disabled,true);
+    assert.ok(requests.slice(beforeOpen).every(([action])=>action==='setup-check'),'opening setup never enables or replaces an old loader');
+    $('qs-workshop-resolve').onclick();assert.equal($('quick-setup').open,false);assert.equal(pages.at(-1),'mods');
+  }
   for(const [action,body] of requests.filter(([action])=>action==='settings')){
     assert.deepEqual(Object.keys(body).sort(),['game','import_folder','workshop']);
     assert.doesNotMatch(JSON.stringify(body),/fixture-replacement-key|fixture-password/);
   }
   for(const id of nodes.keys())if(id!=='heading-mods')assert.ok(html.includes(`id="${id}"`),`Missing Quick Setup element: ${id}`);
-  console.log('Quick Setup legacy prefill, credential preservation/disclosure, completion gates and Bep fallback passed.');
+  assert.doesNotMatch(html,/id="qs-subscribe"/);assert.match(html,/GK2MT · v0\.1\.2/);
+  console.log('Quick Setup account-free missing-only installs, existing-loader guards, retry, optional services, completion gates and advanced Nexus fallback passed.');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

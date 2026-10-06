@@ -70,6 +70,9 @@ function render() {
   $('foundation-install').hidden=state.loader_installed;
   $('foundation-install').disabled=!state.game_found;
   $('foundation-note').hidden=state.loader_installed;
+  $('setup').disabled=!state.game_found || state.loader_installed;
+  $('setup').textContent=state.loader_installed?'BepInEx detected':'Install BepInEx';
+  $('setup').title=state.loader_installed?'Your detected BepInEx installation is kept.':!state.game_found?'Choose your game folder first.':'';
   renderWorkshopSetup();
   $('notice').hidden=state.game_found && state.locations_confirmed;
   $('notice').textContent=state.game_found?'Confirm the detected folders in Quick Setup to get started.':'Open Quick Setup to find the game and prepare mod support.';
@@ -80,24 +83,20 @@ function render() {
 }
 function renderWorkshopSetup(){
   const setup=state.workshop_setup || {},installed=setup.installed===true,ready=state.game_found && state.loader_installed;
-  const canRefresh=ready && ['ready','waiting_workshop'].includes(setup.state);
-  const message=setup.message || 'Refresh the mod inventory to check Workshop loader setup.';
+  const canInstall=ready && setup.can_install===true;
+  const message=setup.message || 'Install Workshop Loader from GitHub after BepInEx is ready.';
   $('workshop-setup-banner').hidden=!ready || installed || state.settings?.workshop_enabled===false;
   $('workshop-setup-title').textContent=['blocked','disabled'].includes(setup.state)?'Workshop loader needs attention':'Set up Steam Workshop mods';
   $('workshop-setup-message').textContent=message;
   $('workshop-loader-status').textContent=message;
   $('workshop-loader-status').classList.toggle('green',installed);
   $('workshop-loader-install').hidden=installed || ['blocked','disabled'].includes(setup.state);
-  $('workshop-loader-install').disabled=!canRefresh;
-  $('workshop-loader-install').title=canRefresh?'':message;
-  $('workshop-subscribe').hidden=installed || ['blocked','disabled'].includes(setup.state);
-  $('workshop-subscribe').disabled=!canRefresh;
-  $('workshop-subscribe').title=canRefresh?'':message;
+  $('workshop-loader-install').disabled=!canInstall;
+  $('workshop-loader-install').title=canInstall?'':message;
   $('workshop-loader-mods').hidden=!ready || !['blocked','disabled'].includes(setup.state);
   $('workshop-loader-mods').textContent=setup.state==='disabled'?'Enable the existing loader in My mods':'Review existing loaders in My mods';
 }
-async function subscribeWorkshopLoader(){return work('Opening the Workshop loader in Steam…',async()=>{const result=await api('steam-workshop',{workshop_id:'3807346541'});toast(result.message || 'Subscribe in Steam, wait for the download, then select Refresh & install loader.');});}
-async function installWorkshopLoader(){return work('Checking the Steam download and setting up the Workshop loader…',async()=>{
+async function installWorkshopLoader(){return work('Downloading and installing Workshop Loader from GitHub…',async()=>{
   let result;try{result=await api('workshop-loader-setup',{});}finally{await refresh(false,true);await refreshSelectedProfile();}
   toast(result.message || 'Workshop loader setup checked. Launch the game to confirm Workshop mods load.');
 });}
@@ -459,17 +458,16 @@ async function stagePaths(paths){
   await reviewPackages(packages,errors);
 }
 function setupArchive(result={}){
-  modal('Set up BepInEx from Nexus #48',`<p>${esc(result.message || 'Download the BepInEx for Graveyard Keeper 2 ZIP from Nexus, then select it here. Your current Workshop loader and configs are preserved.')}</p><p><a href="https://www.nexusmods.com/graveyardkeeper2/mods/48?tab=files" target="_blank" rel="noreferrer">Open Nexus download page ↗</a></p>${result.choices?.length?`<label>Available package<select id="setup-file">${result.choices.map(f=>`<option value="${Number(f.file_id)}">${esc(f.name || f.file_name)} · ${esc(f.version || '')}</option>`).join('')}</select></label>`:''}<label>Downloaded ZIP path<input id="setup-archive" placeholder="Paste the full path to the Nexus #48 ZIP"></label>`,[
+  modal('Advanced · Nexus BepInEx replacement',`<p>${esc(result.message || 'Choose the complete Nexus #48 BepInEx bundle ZIP. This explicit alternative can replace existing foundation files with a backup; your configs and Workshop loader are kept. The normal GitHub setup keeps detected installations unchanged.')}</p><p><a href="https://www.nexusmods.com/graveyardkeeper2/mods/48?tab=files" target="_blank" rel="noreferrer">Nexus bundle download page ↗</a></p><label>Downloaded ZIP path<input id="setup-archive" placeholder="Paste the full path to the Nexus #48 ZIP"></label>`,[
     ['Browse…',()=>work('Choose the BepInEx ZIP…',async()=>{const result=await api('browse',{kind:'zip'});if(result.path)$('setup-archive').value=result.path;})],
-    ...(result.choices?.length?[['Download selected file',()=>runSetup({file_id:Number($('setup-file').value)})]]:[]),
-    ['Install ZIP',()=>{const archive=$('setup-archive').value.trim();if(!archive){toast('Choose the downloaded Nexus #48 ZIP first.',true);return;}runSetup({archive});},true]
+    ['Install replacement ZIP',()=>{const archive=$('setup-archive').value.trim();if(!archive){toast('Choose the downloaded Nexus #48 ZIP first.',true);return;}return runSetup({archive});},true]
   ]);
 }
-function runSetup(body={}){return work('Preparing BepInEx from Nexus #48…',async()=>{
+function runSetup(body={}){return work(body.archive?'Installing the Nexus BepInEx bundle…':'Downloading and installing missing BepInEx files from GitHub…',async()=>{
   const result=await api('setup',body);
   if(result.requires_download){setupArchive(result);return;}
   await refresh();
-  modal('BepInEx setup complete',`<p>${esc(result.message)}</p><p>${Number(result.files)} files installed.</p><p class="footnote">Original files backed up to:</p><pre>${esc(result.backup)}</pre>`,[['Done',()=>$('dialog').close(),true]]);
+  modal('BepInEx setup ready',`<p>${esc(result.message || 'BepInEx is ready. Your detected setup is kept.')}</p>${Number(result.files)>0?`<p>${Number(result.files)} files installed.</p>`:''}${result.backup?`<p class="footnote">Recovery backup:</p><pre>${esc(result.backup)}</pre>`:''}`, [['Done',()=>$('dialog').close(),true]]);
 });}
 function importOwners(conflict){
   const owners=(conflict.owners || []).map(owner=>`<li><strong>${esc(owner.name)}</strong><span>${owner.enabled?'enabled':'disabled'}${owner.kind==='file'?' · current file':owner.kind==='disabled_file'?' · disabled file':''}</span></li>`).join('');
@@ -603,7 +601,6 @@ $('profile-apply').onclick=()=>profileApplied() && profileCompletion.pending?.le
 $('profile-select').addEventListener('change',()=>{selectedProfile=$('profile-select').value;profileRevision++;profileLoading=false;profileComparison=null;profileCompletion=null;profileError='';renderProfiles();if(selectedProfile)return work('Comparing the selected profile…',()=>compareProfile());});
 $('setup').onclick=()=>runSetup();
 $('foundation-install').onclick=()=>runSetup();
-$('workshop-subscribe').onclick=subscribeWorkshopLoader;
 $('workshop-loader-install').onclick=installWorkshopLoader;
 $('setup-zip').onclick=()=>setupArchive();
 $('deck-preview').onclick=()=>work('Verifying game builds, then comparing PC and Deck…',compareDeck);

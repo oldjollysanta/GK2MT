@@ -136,6 +136,7 @@ function libraryConflictChecks(){
   execute(source.slice(source.indexOf('function render()'),source.indexOf('function renderWorkshopSetup')));
   execute(source.slice(source.indexOf('function renderRules()'),source.indexOf('function updateReason')));
   execute('render()');
+  assert.equal(node('setup').disabled,true,'detected BepInEx keeps the default installer disabled');assert.equal(node('setup').textContent,'BepInEx detected');
   assert.equal(node('conflict-count').textContent,2,'identical shared files do not increase the conflict metric; unchecked records remain conflicts');
   const content=node('conflicts-list').innerHTML,shared=content.match(/<details class="import-shared">[\s\S]*?<\/details>/)[0];
   assert.equal((content.match(/ wins<\/span>/g)||[]).length,2,'only differing or unchecked overlaps have winner rows');
@@ -145,6 +146,7 @@ function libraryConflictChecks(){
   assert.match(node('conflicts-list').innerHTML,/No differing file overlaps/);assert.doesNotMatch(node('conflicts-list').innerHTML,/ wins<\/span>/);
   assert.match(node('conflicts-list').innerHTML,/Mods can still conflict when the game runs/,'a zero metric keeps the runtime compatibility limit visible');
   fixture.conflicts=[];execute('render()');assert.equal(node('conflict-count').textContent,0);assert.doesNotMatch(node('conflicts-list').innerHTML,/class="import-shared"/,'no empty shared-file disclosure is shown');
+  fixture.loader_installed=false;execute('render()');assert.equal(node('setup').disabled,false,'a valid game with missing BepInEx enables account-free setup');
 }
 
 async function workshopRefreshChecks() {
@@ -618,17 +620,16 @@ async function zipImportChecks(){
 async function workshopSetupChecks() {
   const inputs=new Map(),calls=[],messages=[],rescans=[];let copied=0,profileRefreshes=0,failure;
   const node=id=>{if(!inputs.has(id))inputs.set(id,{textContent:'',innerHTML:'',classList:{toggle(){}}});return inputs.get(id);};
-  const setup={game_found:true,loader_installed:true,workshop_loader:{kind:'none'},workshop_setup:{state:'waiting_workshop',installed:false,can_install:false,message:'Waiting for <Steam download>',workshop_id:'3807346541'}};
+  const setup={game_found:true,loader_installed:true,workshop_loader:{kind:'none'},workshop_setup:{state:'ready',installed:false,can_install:true,message:'Download <Workshop Loader> from GitHub.',source:'GitHub',workshop_id:'3807346541'}};
   const ui=vm.createContext({$:node,state:setup,toast:(...args)=>messages.push(args),
     work:async(_,task)=>{try{return await task();}catch(error){messages.push([error.message,true]);return null;}},
     refresh:async(...args)=>{rescans.push(args);vm.runInContext('renderWorkshopSetup()',ui);},
     refreshSelectedProfile:async()=>{profileRefreshes++;},
     api:async(action,body)=>{calls.push([action,JSON.parse(JSON.stringify(body))]);
-      if(action==='steam-workshop')return {message:'Subscribe in Steam and wait for the download.'};
       if(action==='workshop-loader-setup'){
         if(failure)throw failure;
         if(setup.workshop_setup.state==='ready'){
-          copied++;setup.workshop_loader.kind='gk2';setup.workshop_setup={...setup.workshop_setup,state:'installed',installed:true,can_install:false,message:'Workshop loader installed. Launch the game to confirm mods load.'};
+          copied++;setup.workshop_loader.kind='workshop';setup.workshop_setup={...setup.workshop_setup,state:'installed',installed:true,can_install:false,message:'Workshop loader installed. Launch the game to confirm mods load.'};
         }
         return setup.workshop_setup;
       }
@@ -636,46 +637,35 @@ async function workshopSetupChecks() {
     }});
   const execute=script=>vm.runInContext(script,ui);
   execute(source.slice(source.indexOf('function renderWorkshopSetup'),source.indexOf('function modDuplicates')));
-  execute(source.slice(source.indexOf("$('workshop-subscribe').onclick"),source.indexOf("$('setup-zip').onclick")));
+  execute(source.slice(source.indexOf("$('workshop-loader-install').onclick"),source.indexOf("$('setup-zip').onclick")));
   execute('renderWorkshopSetup()');
   assert.equal(calls.length,0,'startup/status rendering never installs a loader');
   assert.equal(node('workshop-setup-banner').hidden,false);
-  assert.equal(node('workshop-loader-install').disabled,false,'waiting for Steam permits a refresh after download');
-  assert.equal(node('workshop-subscribe').disabled,false);
-  assert.equal(node('workshop-loader-status').textContent,'Waiting for <Steam download>');
+  assert.equal(node('workshop-loader-install').disabled,false,'missing Workshop Loader can download from GitHub without a Steam cache');
+  assert.equal(node('workshop-loader-status').textContent,'Download <Workshop Loader> from GitHub.');
   assert.equal(node('workshop-loader-status').innerHTML,'','backend messages only use textContent');
   setup.settings={workshop_enabled:false};execute('renderWorkshopSetup()');
   assert.equal(node('workshop-setup-banner').hidden,true,'skipping Workshop in Quick Setup avoids a persistent setup prompt');
   assert.equal(calls.length,0,'skipping Workshop does not install or remove anything');
   setup.settings.workshop_enabled=true;execute('renderWorkshopSetup()');
   assert.equal(node('workshop-setup-banner').hidden,false);
-  await node('workshop-subscribe').onclick();
-  assert.deepEqual(calls.at(-1),['steam-workshop',{workshop_id:'3807346541'}]);
-  assert.equal(copied,0,'opening Steam does not copy or subscribe automatically');
   await node('workshop-loader-install').onclick();
   assert.deepEqual(calls.at(-1),['workshop-loader-setup',{}]);
   assert.deepEqual(rescans.at(-1),[false,true]);
   assert.equal(profileRefreshes,1,'setup refresh also recomputes the selected profile');
-  assert.equal(copied,0);
-  assert.equal(node('workshop-setup-banner').hidden,false);
-  setup.workshop_setup={...setup.workshop_setup,state:'ready',can_install:true,message:'Downloaded loader is ready.'};
-  await node('workshop-loader-install').onclick();
   assert.equal(copied,1);
   assert.equal(node('workshop-setup-banner').hidden,true);
   assert.equal(node('workshop-loader-install').hidden,true);
-  assert.equal(node('workshop-subscribe').hidden,true);
   assert.match(node('workshop-loader-status').textContent,/Launch the game to confirm/);
   await execute('installWorkshopLoader()');assert.equal(copied,1,'an installed current loader is preserved on another refresh');
   const readOnlyCalls=calls.length;
   setup.loader_installed=false;setup.workshop_setup={state:'missing_bepinex',installed:false,can_install:false,message:'Install BepInEx first.'};execute('renderWorkshopSetup()');
   assert.equal(node('workshop-setup-banner').hidden,true,'foundation banner covers the first prerequisite');
   assert.equal(node('workshop-loader-install').disabled,true);
-  assert.equal(node('workshop-subscribe').disabled,true);
   setup.game_found=false;execute('renderWorkshopSetup()');assert.equal(node('workshop-loader-install').disabled,true);
   setup.game_found=setup.loader_installed=true;
   setup.workshop_loader.kind='none';setup.workshop_setup={state:'disabled',installed:false,can_install:false,message:'Enable your existing loader in My mods.'};execute('renderWorkshopSetup()');
   assert.equal(node('workshop-loader-install').hidden,true);
-  assert.equal(node('workshop-subscribe').hidden,true);
   assert.equal(node('workshop-loader-mods').hidden,false);
   assert.match(node('workshop-loader-mods').textContent,/Enable the existing loader/);
   setup.workshop_setup={state:'blocked',installed:false,can_install:false,message:'Resolve the managed loader ownership in My mods.'};execute('renderWorkshopSetup()');
@@ -683,20 +673,43 @@ async function workshopSetupChecks() {
   for(const kind of ['legacy','conflict']){
     setup.workshop_loader.kind=kind;setup.workshop_setup={state:'blocked',installed:false,can_install:false,message:'Resolve the existing <loader> first.'};execute('renderWorkshopSetup()');
     assert.equal(node('workshop-loader-install').hidden,true);
-    assert.equal(node('workshop-subscribe').hidden,true);
     assert.match(node('workshop-loader-status').textContent,/Resolve the existing/);
   }
   assert.equal(calls.length,readOnlyCalls,'disabled/legacy/conflict status never enables or overwrites a loader');
-  setup.workshop_loader.kind='none';setup.workshop_setup={state:'ready',installed:false,can_install:true,message:'Ready to install.'};failure=Error('Close the game before installing.');
+  setup.workshop_loader.kind='none';setup.workshop_setup={state:'ready',installed:false,can_install:true,message:'Ready to install.'};failure=Error('GitHub download failed. Try again.');
   const beforeFailure=profileRefreshes;await node('workshop-loader-install').onclick();
   assert.equal(profileRefreshes,beforeFailure+1);
   assert.equal(node('workshop-loader-install').disabled,false,'a failed copy remains retryable after refreshed status');
   assert.equal(node('workshop-setup-banner').hidden,false);
-  assert.deepEqual(messages.at(-1),['Close the game before installing.',true]);
+  assert.deepEqual(messages.at(-1),['GitHub download failed. Try again.',true]);
+  failure=null;await node('workshop-loader-install').onclick();assert.equal(copied,2,'retry installs only after the failed download is resolved');
+  assert.ok(calls.every(([action])=>action==='workshop-loader-setup'),'loader setup does not open Steam, connect Nexus, or request subscriptions');
   assert.match(html,/STEP 1 · MODDING FOUNDATION/);
   assert.match(html,/STEP 2 · STEAM WORKSHOP/);
-  assert.match(html,/id="workshop-loader-install"[^>]*>.*Refresh &amp; install loader|id="workshop-loader-install"[^>]*>.*Refresh & install loader/);
+  assert.match(html,/id="workshop-loader-install"[^>]*>.*Install Workshop Loader/);
+  assert.doesNotMatch(html,/id="workshop-subscribe"/);
+  assert.match(html,/id="foundation-note"[^>]*>Pinned GitHub downloads\. No account or API key needed/);
   assert.doesNotMatch(source,/Install your chosen loader separately/);
+}
+
+async function foundationSetupChecks(){
+  const inputs=new Map(),calls=[],busy=[];let review,refreshed=0,result={files:12,message:'BepInEx installed from GitHub. Existing configs kept.'},failure;
+  const node=id=>{if(!inputs.has(id))inputs.set(id,{value:'',close(){}});return inputs.get(id);};
+  const ui=vm.createContext({$:node,modal:(...args)=>{review=args;},toast(){},refresh:async()=>{refreshed++;},work:async(message,task)=>{busy.push(message);return task();},
+    api:async(action,body)=>{calls.push([action,JSON.parse(JSON.stringify(body))]);if(action!=='setup')throw Error('Unexpected setup action: '+action);if(failure)throw failure;return result;}});
+  const execute=script=>vm.runInContext(script,ui);
+  execute(source.slice(source.indexOf('const escapeHTML'),source.indexOf('function toast')));
+  execute(source.slice(source.indexOf('function setupArchive('),source.indexOf('function importOwners(')));
+  await execute('runSetup()');assert.deepEqual(calls.at(-1),['setup',{}],'normal foundation setup needs no account key, archive or Nexus file ID');assert.match(busy.at(-1),/GitHub/);
+  assert.equal(review[0],'BepInEx setup ready');assert.match(review[1],/12 files installed/);assert.doesNotMatch(review[1],/undefined|Original files backed up to/);
+  result={files:0,message:'Detected BepInEx kept unchanged.'};await execute('runSetup()');
+  assert.match(review[1],/kept unchanged/);assert.doesNotMatch(review[1],/0 files installed|<pre>/,'preserved setup does not invent installation counts or a backup path');
+  execute('setupArchive()');assert.match(review[1],/explicit alternative can replace existing foundation files with a backup/);
+  const beforeConfirm=calls.length;node('setup-archive').value='C:/fixtures/Nexus-BepInEx.zip';
+  result={files:14,message:'Nexus bundle installed.',backup:'C:/fixture/backups/replacement'};await review[2].find(([label])=>label==='Install replacement ZIP')[1]();
+  assert.equal(calls.length,beforeConfirm+1);assert.deepEqual(calls.at(-1),['setup',{archive:'C:/fixtures/Nexus-BepInEx.zip'}]);assert.match(review[1],/Recovery backup/);
+  assert.equal(refreshed,3);
+  failure=Error('GitHub download unavailable. Try again.');await assert.rejects(execute('runSetup()'),/download unavailable/);assert.equal(refreshed,3,'failed download does not announce a completed setup');
 }
 
 async function uninstallChecks() {
@@ -784,6 +797,7 @@ async function main() {
   await profileChecks();
   await zipImportChecks();
   await workshopSetupChecks();
+  await foundationSetupChecks();
   await uninstallChecks();
   run('renderUpdates()');
   assert.equal(state.downloads.length,0);assert.equal($('download-list').innerHTML,'');
@@ -1105,6 +1119,6 @@ async function main() {
   context.linkEvent.target.closest=()=>({getAttribute:()=> 'file:///untrusted'});
   assert.equal(run('openLink(linkEvent)'),true);
   assert.equal(requests.length,beforeInvalidLink,'only HTTPS links reach the external opener');
-  console.log('Web checks passed: guided Workshop subscribe/install flow, prerequisite and existing-loader guards, retry recovery, duplicate warnings and details, profile save/import/export/delete, source-specific missing installs, reviewed version/variant acceptance, completion recompare, uninstall review/cancel/confirmation, Steam/Nexus/Manual sources, Workshop rescans, native bridge, Nexus browsing with shared install/update progress, internal guide, external links, downloads, escaped update changelogs and fallback states, remembered Nexus key controls, optional remembered Deck password, trust/cancel cleanup, target isolation, Proton setup status, and mandatory game-version comparison.');
+  console.log('Web checks passed: account-free missing-only foundation/loader setup, prerequisite and existing-loader guards, retry recovery, batch ZIP conflict review, shared-file presentation, duplicate warnings, profiles, uninstall review, Steam/Nexus/Manual sources, Workshop rescans, native bridge, Nexus browsing and downloads, update changelogs, remembered credentials, Deck trust and target isolation, Proton setup, and mandatory game-version comparison.');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -10,13 +10,19 @@ Download [GK2MT.exe](https://github.com/oldjollysanta/GK2MT/releases/latest/down
 
 Quick Setup opens on first use and continues to appear until you choose **Finish setup**. Green fields are ready, yellow fields need attention, and empty optional fields stay neutral. Reopen it anytime from **Locations & setup**.
 
-1. **Confirm your folders.** GK2MT detects Steam libraries. Choose the game folder containing `GraveyardKeeper2.exe` and the Workshop folder ending in `steamapps\workshop\content\4358690`. The optional bulk ZIP import folder defaults to `%USERPROFILE%\Downloads\GK2MT`.
-2. **Set up BepInEx.** Existing installations are detected. For a new setup, use the [BepInEx bundle on Nexus #48](https://www.nexusmods.com/graveyardkeeper2/mods/48) through **Download & set up**, or choose **Use downloaded ZIP**. Automatic download requires a connected Nexus Premium account. Existing mod configs and your Workshop loader are preserved; replaced files are backed up.
-3. **Set up Workshop support if you want it.** Open the loader's Steam page from the setup controls, subscribe to **GK2 Workshop Loader**, and wait for Steam Downloads to finish. Choose **Refresh & install loader**; GK2MT copies its validated DLL into the game's patchers folder. Leave Workshop setup unchecked if you only want Nexus or manual mods.
+1. **Confirm your folders.** GK2MT detects Steam libraries. Choose the game folder containing `GraveyardKeeper2.exe` and the Workshop location ending in `steamapps\workshop\content\4358690`. That folder can be missing; Steam creates it after your first Workshop mod download. The optional bulk ZIP import folder defaults to `%USERPROFILE%\Downloads\GK2MT`.
+2. **Set up BepInEx.** Detected installations are kept. If it is missing, choose **Install BepInEx** to download the pinned BepInEx and Configuration Manager releases directly from GitHub. No account, Premium subscription, or API key is required. Existing files and configs are kept.
+3. **Set up Workshop support if you want it.** Choose **Install Workshop Loader** to download its pinned GitHub release into the game's patchers folder. No Steam loader subscription or existing Workshop download folder is needed. Detected loaders are kept; resolve a disabled or conflicting loader in **My mods**. Leave Workshop setup unchecked if you only want Nexus or manual mods.
 4. **Add optional connections.** Expand Nexus to enter your personal API key, or Steam Deck to enter its connection details. You can do either later.
 5. Choose **Finish setup**, then launch the game to confirm mod support works. Approve Workshop mods if the loader asks.
 
-Close the game before installing, updating, enabling, disabling, uninstalling, or syncing mods. Scanning your installation does not install or replace a loader automatically.
+The install buttons show progress while downloading and validating files. If a download fails, the error appears and the same button remains available to retry. Scanning or opening setup does not install anything.
+
+Setup pins [BepInEx 5.4.23.5](https://github.com/BepInEx/BepInEx/releases/tag/v5.4.23.5), [Configuration Manager 19.0 for BepInEx 5](https://github.com/BepInEx/BepInEx.ConfigurationManager/releases/tag/v19.0), and [GK2 Workshop Loader 1.0.0](https://github.com/Zoriten/-GK2-WorkshopLoader/releases/tag/v1.0.0). These assets are downloaded from their upstream releases during setup, not embedded in GK2MT. BepInEx and Workshop Loader use MIT licenses, Doorstop uses LGPL-2.1, and Configuration Manager uses LGPL-3.0; their notices are retained. See [third-party notices](../THIRD-PARTY-NOTICES.md).
+
+**Advanced · Nexus bundle ZIP** accepts the complete [Nexus #48 bundle](https://www.nexusmods.com/graveyardkeeper2/mods/48) you downloaded. Installing its ZIP needs no API key. This explicit alternative can replace existing foundation files with a backup while preserving configs and Workshop loaders. In Quick Setup it appears only when BepInEx is missing; **Locations & setup** retains the replacement option.
+
+Close the game before installing, updating, enabling, disabling, uninstalling, or syncing mods.
 
 ## Add mods
 

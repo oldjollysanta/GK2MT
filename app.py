@@ -78,7 +78,8 @@ def setup_check(config, values=None):
             'Steam will create this folder after your first Workshop download.' if field == 'workshop' and not path.exists() else
             'Optional. Create or choose this folder before bulk imports.' if field == 'import_folder' and not path.exists() else
             'Choose a physical folder, not a file or linked folder.')
-        fields[field] = {'path': value, 'status': 'ready' if valid else 'attention' if value or field == 'game' else 'empty',
+        pending_workshop = field == 'workshop' and physical and not path.exists()
+        fields[field] = {'path': value, 'status': 'ready' if valid else 'empty' if pending_workshop else 'attention' if value or field == 'game' else 'empty',
                          'valid': valid, 'message': message}
     missing = [name for name in BEPINEX_FILES if not fields['game']['valid']
                or not (game / name).is_file() or not inventory._safe(game / name, game.absolute())]
@@ -174,13 +175,25 @@ def foundation_metadata(library):
                     return {}
     except (OSError, ValueError):
         return {}
+    if installed.get('source') == 'GitHub':
+        component = next((item for item in installed.get('components', [])
+                          if item.get('name') == 'Configuration Manager'), {})
+        if not component.get('version') or component.get('preserved'):
+            return {}
+        return {'nexus_mod_id': None, 'file_id': None, 'source': 'Manual',
+                'setup_source': 'GitHub', 'foundation': True,
+                'version': component['version'], 'package_version': component['version'],
+                'version_source': 'Verified GitHub release'}
     return {key: installed.get(key) for key in ('nexus_mod_id', 'file_id', 'package_version')}
 
 
 def record_foundation(config, result):
+    if result.get('already_installed') or result.get('files') == 0:
+        return
     try:
         manager.save_json(package_manager(config).data / 'foundation.json',
-                          {key: result[key] for key in ('nexus_mod_id', 'file_id', 'package_version', 'installed_hashes')})
+                          {key: result.get(key) for key in ('source', 'components', 'nexus_mod_id',
+                                                           'file_id', 'package_version', 'installed_hashes')})
     except OSError as exc:
         warning = f"BepInEx was installed, but update tracking could not be saved: {exc}. Backup: {result['backup']}"
         result.setdefault('warnings', []).append(warning)
@@ -308,7 +321,7 @@ def rescan(config, force_workshop_titles=False):
 def uninstall_reason(row):
     if row.get('workshop_id') or row.get('source') == 'Steam Workshop':
         return 'Steam manages this mod. Unsubscribe through its Workshop page.'
-    if row.get('nexus_mod_id') == integrations.SETUP_MOD:
+    if row.get('foundation') or row.get('nexus_mod_id') == integrations.SETUP_MOD:
         return 'The BepInEx foundation cannot be uninstalled as a mod.'
     if row.get('source') not in ('GK2MT', 'Manual', 'Vortex') or not row.get('paths'):
         return 'This mod has no safely identifiable installed files.'
@@ -322,9 +335,8 @@ def uninstall_reason(row):
 def workshop_setup(config, install=False):
     status = integrations.workshop_loader_setup(Path(config['game']), Path(config['workshop']), DATA)
     if status['state'] in ('ready', 'waiting_workshop'):
-        target = integrations.WORKSHOP_TARGET.casefold()
         for package in package_manager(config).state['packages']:
-            if any(path.removesuffix(inventory.DISABLED).casefold() == target
+            if any(Path(path.casefold().removesuffix(inventory.DISABLED)).name in inventory.LOADERS
                    for field in ('paths', 'retired_paths', 'adopted_paths') for path in package.get(field, [])):
                 return status | {'state': 'blocked', 'can_install': False,
                                  'message': f"An imported package owns the Workshop loader: {package['name']}. Enable or resolve that package in My mods before installing another copy."}
@@ -552,7 +564,7 @@ def snapshot():
             'workshop_loader': inventory.loader_info(game), 'workshop_setup': workshop_setup(config),
             'game_found': (game / 'GraveyardKeeper2.exe').exists(), 'nexus_connected': bool(NEXUS_KEY),
             'nexus_saved': (DATA / 'nexus-key.bin').is_file(), 'nexus_error': NEXUS_ERROR,
-            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.1',
+            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.2',
             'deck_connection': deck_connection(config), **download_state()}
 
 
@@ -1221,8 +1233,6 @@ def dispatch(action, body):
             raise ValueError(checks['game']['message'])
         if not checks['loader_installed']:
             raise ValueError('Install BepInEx before completing Quick Setup.')
-        if workshop_enabled and not checks['workshop_found']:
-            raise ValueError('Subscribe to the Workshop loader, wait for Steam to download it, then refresh setup.')
         if workshop_enabled and not workshop_setup(config)['installed']:
             raise ValueError('Finish the Workshop loader setup, or leave Workshop mods unchecked for now.')
         config.update(quick_setup_completed=True, workshop_enabled=workshop_enabled)
@@ -1403,9 +1413,14 @@ def dispatch(action, body):
         PREVIEW = None
         return {'message': 'Rules saved and imported packages redeployed.'}
     if action == 'setup':
-        manager.ensure_game_stopped()
         if not (game / 'GraveyardKeeper2.exe').is_file():
             raise ValueError('Set a valid game folder before setup.')
+        if not body.get('archive') and body.get('file_id') is None and all(
+                (game / name).is_file() and inventory._safe(game / name, game.absolute())
+                for name in BEPINEX_FILES):
+            return {'requires_download': False, 'already_installed': True, 'files': 0,
+                    'message': 'Existing BepInEx detected. Your installation was kept.'}
+        manager.ensure_game_stopped()
         overlap = foundation_overlap(package_manager(config))
         if overlap:
             raise ValueError(overlap)
