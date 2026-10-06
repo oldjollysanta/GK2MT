@@ -112,7 +112,7 @@ The flow is **Check mods → Get mods ready → Review & apply**. Missing Nexus 
 
 On the Deck, set a system password if needed, enable SSH, and find its IP. GK2MT handles the Windows SSH connection and can remember the address and optionally encrypt the system password.
 
-The page guides **Connect → Compare → BepInEx → Deck Sync**. Comparison first checks that PC and Deck have the same installed Steam game build. GK2MT can configure BepInEx's `winhttp` override in the game's existing Proton environment, then transfer the supported mod setup with backups and hash verification. Game saves remain managed by Steam Cloud.
+The page guides **Connect → Compare → BepInEx → Deck Sync**. Comparison first checks that PC and Deck have the same installed Steam game build. GK2MT installs and configures BepInEx on your Deck automatically through setup and sync, with no manual Steam launch options. [How it works: Proton DLL override](DECK-SETUP.md#game-setup-enable-bepinex-through-proton). Mod transfers include backups and hash verification. Game saves remain managed by Steam Cloud.
 
 The Deck uses the Windows game and mods through Proton. Launch it once to create the Proton environment before setup. See the [Deck setup guide](DECK-SETUP.md) for commands and troubleshooting. Deck workflows have fixture and SSH test coverage; the screenshot below uses a simulated connection, and physical Deck validation remains separate.
 
