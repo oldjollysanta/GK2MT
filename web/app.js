@@ -108,12 +108,29 @@ function renderDuplicates(){
 }
 function renderMods(){
   const query=$('search').value.toLowerCase(),source=$('source-filter').value,status=$('state-filter').value,category=$('category-filter').value;
-  const rows=state.mods.filter(m=>(!query || `${m.name} ${sourceLabel(m)} ${m.workshop_id || ''}`.toLowerCase().includes(query))&&(!source||sourceLabel(m)===source)&&(!status||m.enabled===(status==='enabled'))&&(!category||(m.category||'Uncategorized')===category));
+  const isOn=m=>m.enabled || (m.loader_kind==='workshop' && m.trust_state==='yes' && m.can_toggle!==false);
+  const rows=state.mods.filter(m=>(!query || `${m.name} ${sourceLabel(m)} ${m.workshop_id || ''}`.toLowerCase().includes(query))&&(!source||sourceLabel(m)===source)&&(!status||(status==='pending'?m.approval_required===true:m.approval_required!==true && isOn(m)===(status==='enabled')))&&(!category||(m.category||'Uncategorized')===category));
   $('list-count').textContent=rows.length; $('empty').hidden=rows.length>0;
   $('filtered-count').textContent=`Showing ${rows.length} of ${state.mods.length}.`;
   $('empty-message').textContent=state.mods.length?'No mods match these filters.':'Your library is ready. Drop a mod ZIP, or choose Install ZIP to add your first mod.';
   $('clear-filters').hidden=!state.mods.length;
-  $('mod-list').innerHTML=rows.map(m=>`<tr><td><input type="checkbox" aria-label="Enable ${esc(m.name)}" data-toggle="${esc(m.id)}" ${m.enabled?'checked':''} ${m.can_toggle===false?'disabled':''}></td><td class="mod-name"><div class="mod-entry"><span class="mod-icon"><svg class="icon" aria-hidden="true"><use href="#i-${sourceLabel(m)==='Steam'?'workshop':'star'}"/></svg></span><div class="mod-copy"><span class="mod-title">${esc(m.name)}</span><span class="mod-sub">${m.workshop_id?'Workshop #'+esc(m.workshop_id):m.nexus_mod_id?'Nexus #'+esc(m.nexus_mod_id):esc(m.paths?.[0]?.split('/').slice(0,2).join('/') || 'Local package')}</span>${modDuplicates(m.id).length?`<span class="mod-sub warning">Duplicate copy${modDuplicates(m.id).some(group=>group.enabled_count>1)?' · multiple enabled':' · extra copy installed'}</span>`:''}</div></div></td><td class="muted">${esc(m.display_version ?? m.version ?? 'Unknown')}</td><td class="muted">${esc(m.category || 'Uncategorized')}</td><td><span class="badge ${sourceClass(m)}">${sourceLabel(m)}</span></td><td><span class="status ${!m.enabled?'off':''}">${esc(m.status || (m.enabled?'Enabled':'Disabled'))}</span></td><td class="right"><button class="row-action" data-details="${esc(m.id)}" aria-label="Details for ${esc(m.name)}"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td></tr>`).join('');
+  $('mod-list').innerHTML=rows.map(m=>`<tr><td><input type="checkbox" aria-label="${m.approval_required?'Approval pending for':'Enable'} ${esc(m.name)}" data-toggle="${esc(m.id)}" ${isOn(m) || m.approval_required?'checked':''} ${m.approval_required?'data-approval-pending aria-checked="mixed" title="Unblocked and waiting for approval. Uncheck to block again."':''} ${m.can_toggle===false?'disabled':''}></td><td class="mod-name"><div class="mod-entry"><span class="mod-icon"><svg class="icon" aria-hidden="true"><use href="#i-${sourceLabel(m)==='Steam'?'workshop':'star'}"/></svg></span><div class="mod-copy"><span class="mod-title">${esc(m.name)}</span><span class="mod-sub">${m.workshop_id?'Workshop #'+esc(m.workshop_id):m.nexus_mod_id?'Nexus #'+esc(m.nexus_mod_id):esc(m.paths?.[0]?.split('/').slice(0,2).join('/') || 'Local package')}</span>${modDuplicates(m.id).length?`<span class="mod-sub warning">Duplicate copy${modDuplicates(m.id).some(group=>group.enabled_count>1)?' · multiple enabled':' · extra copy installed'}</span>`:''}</div></div></td><td class="muted">${esc(m.display_version ?? m.version ?? 'Unknown')}</td><td class="muted">${esc(m.category || 'Uncategorized')}</td><td><span class="badge ${sourceClass(m)}">${sourceLabel(m)}</span></td><td><span class="status ${m.approval_required?'pending':!isOn(m)?'off':''}">${esc(m.approval_required?'Unblocked · approval needed':m.status || (m.enabled?'Enabled':'Disabled'))}</span>${m.approval_required?`<div><button class="small approval-launch" data-workshop-approve="${esc(m.id)}">Launch to approve</button></div>`:''}</td><td class="right"><button class="row-action" data-details="${esc(m.id)}" aria-label="Details for ${esc(m.name)}"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button></td></tr>`).join('');
+  $('mod-list').querySelectorAll('[data-approval-pending]').forEach(input=>input.indeterminate=true);
+}
+function workshopApproval(id,name){
+  const mod=state.mods.find(m=>m.id===id);if(!mod?.approval_required)return;
+  modal('Finish enabling Workshop mod',`<p><strong>${esc(name || mod.name)}</strong> is unblocked and waiting for the Workshop loader’s approval.</p><p>Launch the game and approve this mod when the loader asks. After closing the game, use Rescan to confirm it is enabled.</p><p class="footnote">The dash in its checkbox means approval is pending. Uncheck it to block the mod again.</p>`,[['Later',()=>$('dialog').close()],['Launch to approve',()=>work('Launching the game for Workshop approval…',async()=>{$('dialog').close();toast((await api('launch',{})).message);}),true]]);
+}
+function setModEnabled(id,enabled,input){
+  const restore=()=>{if(input){input.checked=!enabled;input.indeterminate='approvalPending' in input.dataset;}};
+  if(working){restore();return null;}
+  return work('Saving mod state…',async()=>{
+    let saved=false;
+    try{
+      const result=await api('toggle',{id,enabled});saved=true;await refresh();toast(result.message);
+      if(result.approval_required)workshopApproval(id,result.mod_name);
+    }finally{if(!saved)restore();}
+  });
 }
 function details(id){
   const m=state.mods.find(m=>m.id===id);if(!m)return;
@@ -353,6 +370,32 @@ async function reviewProfile(){return work('Checking the profile before applying
   if(mismatches.length){const input=$('profile-accept-versions'),button=$('dialog-actions').lastElementChild;input.checked=false;input.addEventListener('change',()=>{button.disabled=!!blockers.length || !input.checked;button.title=blockers.length?'Resolve the missing or ambiguous enabled mods before applying.':input.checked?'':'Accept the installed version differences to continue.';});}
 });}
 let deckProtonState=null, deckProtonTarget='', deckProtonRevision=0, deckPasswordTarget,deckSyncResult=null,deckComparisonFailure='',deckSettingsInitialized=false;
+const deckSyncDefaults={mods:true,configs:true,approvals:true,loader:true,game_settings:false};
+let deckSyncOptions=null,deckSyncOptionsSaving=false,deckSyncOptionsError='';
+function normalizedDeckSyncOptions(options={}){return Object.fromEntries(Object.entries(deckSyncDefaults).map(([key,value])=>[key,typeof options[key]==='boolean'?options[key]:value]));}
+function selectedDeckSyncOptions(){return deckSyncOptions || normalizedDeckSyncOptions(state?.settings?.deck_sync_options);}
+function deckSyncScope(options=selectedDeckSyncOptions()){const names={mods:'mods',configs:'mod configs',approvals:'Workshop approvals',loader:'BepInEx & loaders',game_settings:'game preferences'};return Object.keys(names).filter(key=>options[key]).map(key=>names[key]).join(', ');}
+function deckNeedsLoader(){const options=selectedDeckSyncOptions();return options.mods || options.loader;}
+function deckRuntimeReady(){return !deckNeedsLoader() || (deckProtonState?.configured===true && !deckProtonState.loading && (selectedDeckSyncOptions().loader?state.loader_installed!==false:deckProtonState.loader_installed===true));}
+function deckSelectionReady(){return !deckSyncOptionsSaving && !deckSyncOptionsError && Object.values(selectedDeckSyncOptions()).some(Boolean);}
+function renderDeckSyncOptions(){
+  if(!deckSyncOptions){deckSyncOptions=selectedDeckSyncOptions();for(const key of Object.keys(deckSyncDefaults))$('deck-sync-'+key).checked=deckSyncOptions[key];}
+  $('deck-sync-options-summary').textContent=deckSyncScope() || 'Nothing selected';
+  $('deck-sync-options-status').textContent=deckSyncOptionsSaving?'Saving choices…':deckSyncOptionsError?'Choices were not saved. Retry before comparing. '+deckSyncOptionsError:!Object.values(deckSyncOptions).some(Boolean)?'Choose at least one group to compare and sync.':'Choices are saved automatically. Unselected groups stay unchanged on the Deck. Changing choices requires a new comparison.';
+  $('deck-sync-options-status').classList.toggle('warning',!!deckSyncOptionsError || !Object.values(deckSyncOptions).some(Boolean));
+  $('deck-sync-options-save').hidden=!deckSyncOptionsError;
+  for(const key of Object.keys(deckSyncDefaults))$('deck-sync-'+key).disabled=deckSyncOptionsSaving;
+}
+async function saveDeckSyncOptions(){
+  if(working || deckSyncOptionsSaving)return;
+  const options={...selectedDeckSyncOptions()};resetDeckPreview();deckSyncOptionsSaving=true;deckSyncOptionsError='';renderDeckSyncOptions();renderDeckActions();
+  return work('Saving Deck sync choices…',async()=>{
+    try{const result=await api('deck-sync-options',{options});deckSyncOptions=normalizedDeckSyncOptions(result.options || options);for(const key of Object.keys(deckSyncDefaults))$('deck-sync-'+key).checked=deckSyncOptions[key];await refresh();}
+    catch(error){deckSyncOptionsError=error.message;throw error;}
+    finally{deckSyncOptionsSaving=false;renderDeckSyncOptions();renderDeckConnection();}
+  });
+}
+async function changeDeckSyncOptions(){if(working || deckSyncOptionsSaving){for(const key of Object.keys(deckSyncDefaults))$('deck-sync-'+key).checked=selectedDeckSyncOptions()[key];return;}deckSyncOptions=Object.fromEntries(Object.keys(deckSyncDefaults).map(key=>[key,$('deck-sync-'+key).checked]));return saveDeckSyncOptions();}
 function locationsBody(){return {game:$('game-path').value,workshop:$('workshop-path').value,import_folder:$('import-path').value};}
 function deckFields(){return Object.fromEntries(['host','user','port','key','game_path','workshop_path'].map(key=>[key,$('deck-'+key).value.trim()]));}
 function deckFieldsFill(deck={}){for(const key of ['host','user','port','key','game_path','workshop_path'])$('deck-'+key).value=deck?.[key] ?? ({user:'deck',port:22}[key] ?? '');}
@@ -371,28 +414,28 @@ async function forgetDeckPassword(){
   await work('Forgetting the Deck password…',async()=>{const result=await api('deck-forget-password',{});await refresh();toast(result.message || 'Saved Deck password removed.');});
 }
 function deckReady(){return !!state?.deck_connection?.connected && ['host','user','port','key'].every(key=>String(deckFields()[key])===String(state.settings.deck?.[key] ?? ''));}
-function resetDeckPreview(){comparison=null;deckSyncResult=null;deckComparisonFailure='';$('deck-comparison').innerHTML='<h2>Review PC → Deck changes</h2><p class="muted">Connect your Deck, then compare. GK2MT checks the game version before reviewing mod files.</p>';renderDeckActions();}
+function resetDeckPreview(){comparison=null;deckSyncResult=null;deckComparisonFailure='';$('deck-comparison').innerHTML='<h2>Review PC → Deck changes</h2><p class="muted">Choose what to sync, then compare. GK2MT checks the game version before reviewing the selected files.</p>';renderDeckActions();}
 function resetDeckProton(){deckProtonState=null;deckProtonTarget='';deckProtonRevision++;}
-function deckCanInstall(){return deckReady() && !!deckFields().game_path && !!deckFields().workshop_path && comparison?.game_version?.matched===true && !deckProtonState?.loading && deckProtonState?.configured===false;}
-function deckCanSync(){return deckReady() && comparison?.game_version?.matched===true && deckProtonState?.configured===true && !deckProtonState.loading && state.loader_installed!==false && ['additions','changes','extras'].some(key=>Number(comparison.counts?.[key])>0);}
+function deckCanInstall(){return deckNeedsLoader() && deckSelectionReady() && deckReady() && !!deckFields().game_path && !!deckFields().workshop_path && comparison?.game_version?.matched===true && !deckProtonState?.loading && deckProtonState?.configured===false;}
+function deckCanSync(){return deckSelectionReady() && deckReady() && comparison?.game_version?.matched===true && deckRuntimeReady() && ['additions','changes','extras'].some(key=>Number(comparison.counts?.[key])>0);}
 function renderDeckActions(){
-  const connected=deckReady(),folders=deckFields(),canCompare=connected && !!folders.game_path && !!folders.workshop_path;
+  const connected=deckReady(),folders=deckFields(),hasFolders=!!folders.game_path && !!folders.workshop_path,canCompare=deckSelectionReady() && connected && hasFolders;
   const install=deckCanInstall(),sync=deckCanSync(),proton=deckProtonState;
-  const plan=comparison || deckSyncResult?.plan,matched=plan?.game_version?.matched===true,loaderReady=proton?.configured===true;
+  const plan=comparison || deckSyncResult?.plan,matched=plan?.game_version?.matched===true,loaderNeeded=deckNeedsLoader(),loaderReady=proton?.configured===true;
   const unchanged=plan && !Number(plan.counts?.additions) && !Number(plan.counts?.changes) && !Number(plan.counts?.extras);
   const parity=deckSyncResult?.result?.parity===true || (unchanged && !plan.unsupported?.length);
   const complete=connected && !!folders.game_path && !!folders.workshop_path && proton?.configured===true && proton.loader_installed===true;
   for(const [id,number,label,disabled,status,description] of [
-    ['deck-connect',1,connected?'Reconnect':'Connect',false,canCompare?'done':'action',connected?canCompare?'Deck connected · game folders found':'Choose the missing folders in Advanced':'Enter your Deck address and password'],
-    ['deck-preview',2,comparison || deckSyncResult?'Compare again':'Compare',!canCompare,matched?'done':canCompare?'action':'waiting',matched?`Same Steam build ${plan.game_version.build_id} · file changes reviewed`:deckComparisonFailure?'Comparison stopped · see the message below':'Verify game versions and review mod files'],
-    ['deck-proton-setup',3,loaderReady?proton.loader_installed?'BepInEx ready':'BepInEx configured':'Install BepInEx',!install,loaderReady?'done':install?'action':'waiting',loaderReady?proton.loader_installed?'Loader files and Proton setting detected':'Loading configured · files copied during sync':proton?.loading?'Checking automatically…':proton?.error?'Setup check needs attention':matched?'Prepare the Proton loading setting':'Unlocks after a matching comparison'],
-    ['sync-now',4,'Deck Sync',!sync,parity?'done':sync?'action':'waiting',parity?'Managed mod file hashes match':deckSyncResult?'Copied · some custom files need manual setup':unchanged?'No transfer needed · review any custom files':plan?`${Number(plan.counts?.additions) || 0} new · ${Number(plan.counts?.changes) || 0} changed · ${Number(plan.counts?.extras) || 0} extras`:'Back up, copy mods and verify their hashes']
+    ['deck-connect',1,connected?'Reconnect':'Connect',false,connected && hasFolders?'done':'action',connected?hasFolders?'Deck connected · game folders found':'Choose the missing folders in Advanced':'Enter your Deck address and password'],
+    ['deck-preview',2,comparison || deckSyncResult?'Compare again':'Compare',!canCompare,matched?'done':canCompare?'action':'waiting',matched?`Same Steam build ${plan.game_version.build_id} · file changes reviewed`:deckComparisonFailure?'Comparison stopped · see the message below':'Verify game versions and review selected files'],
+    ['deck-proton-setup',3,!loaderNeeded?'BepInEx not needed':loaderReady?proton.loader_installed?'BepInEx ready':'BepInEx configured':'Install BepInEx',!install,!loaderNeeded || loaderReady?'done':install?'action':'waiting',!loaderNeeded?'Selected groups can sync without loader setup':loaderReady?proton.loader_installed?'Loader files and Proton setting detected':'Loading configured · files copied during sync':proton?.loading?'Checking automatically…':proton?.error?'Setup check needs attention':matched?'Prepare the Proton loading setting':'Unlocks after a matching comparison'],
+    ['sync-now',4,'Deck Sync',!sync,parity?'done':sync?'action':'waiting',parity?'Selected setup matches':deckSyncResult?'Copied · some custom files need manual setup':unchanged?'No transfer needed · review any custom files':plan?`${Number(plan.counts?.additions) || 0} new · ${Number(plan.counts?.changes) || 0} changed · ${Number(plan.counts?.extras) || 0} extras`:'Back up, copy selected files and verify hashes']
   ])actionCard(id,number,label,status,description,disabled);
-  $('deck-preview').title=canCompare?'Verify both game versions and review mod files.':'Connect and find the game folders first.';
+  $('deck-preview').title=canCompare?'Verify both game versions and review selected files.':!deckSelectionReady()?'Choose at least one group and save your choices.':'Connect and find the game folders first.';
   $('deck-proton-setup').title=proton?.configured?'Loading is configured. Deck Sync copies any missing BepInEx files.':install?'Prepare BepInEx loading through Proton.':'Compare matching game versions first.';
-  $('sync-now').title=sync?'Back up changed Deck files, sync and verify.':!comparison?'Compare first to review the files.':!proton?.configured?'Install BepInEx loading first.':state.loader_installed===false?'Install BepInEx on your PC first.':'No file transfer is needed.';
+  $('sync-now').title=sync?'Back up changed Deck files, sync and verify.':!comparison?'Compare first to review the selected files.':loaderNeeded && !proton?.configured?'Install BepInEx loading first.':loaderNeeded && !selectedDeckSyncOptions().loader && !proton?.loader_installed?'Include BepInEx & loaders, or install its files on the Deck.':loaderNeeded && selectedDeckSyncOptions().loader && state.loader_installed===false?'Install BepInEx on your PC first.':'No file transfer is needed.';
   $('deck-proton-info').hidden=!install;
-  $('deck-setup-guide').hidden=complete;
+  $('deck-setup-guide').hidden=complete || connected && !loaderNeeded;
   $('deck-guide-message').textContent=!connected?'Turn on SSH and find your Deck’s IP address. The guide walks you through it.':!proton?.configured?'Your Deck is connected. Compare game versions, prepare BepInEx, then sync your PC’s mods.':'BepInEx loading is configured. Deck Sync copies the missing loader files and mods from your PC.';
   const settings=state.settings.deck || {};
   if(!deckSettingsInitialized){$('deck-settings').open=!settings.host;deckSettingsInitialized=true;}
@@ -421,6 +464,7 @@ async function configureDeckProton(install=false){
   if(install && deckProtonState?.configured===true)await compareDeck();
 }
 function renderDeckConnection(){
+  renderDeckSyncOptions();
   const connected=deckReady(),session=state?.deck_connection,folders=deckFields();
   const hasFolders=!!folders.game_path && !!folders.workshop_path;
   $('deck-disconnect').hidden=!session?.connected;
@@ -428,7 +472,7 @@ function renderDeckConnection(){
   if(!connected && (comparison || deckSyncResult))resetDeckPreview();
   renderDeckPassword();
   renderDeckProton();
-  const next=!hasFolders?'Choose folders in Deck settings, or reconnect to detect them.':deckComparisonFailure?'Resolve the comparison message below.':deckProtonState?.error?'BepInEx check needs attention: '+deckProtonState.error+' Follow the setup guide, then compare again.':deckSyncResult?'Sync finished. Launch the game on Deck to confirm the mods load.':!comparison?'Next: compare to verify the game version.':state.loader_installed===false?'Install BepInEx on your PC in Locations & setup, then compare again.':!deckProtonState?.configured?'Next: Install BepInEx.':deckCanSync()?'Ready to sync. Review the file changes below.':'Managed files already match. Review any custom files below.';
+  const next=!deckSelectionReady()?'Choose at least one group and save your choices before comparing.':!hasFolders?'Choose folders in Deck settings, or reconnect to detect them.':deckComparisonFailure?'Resolve the comparison message below.':deckNeedsLoader() && deckProtonState?.error?'BepInEx check needs attention: '+deckProtonState.error+' Follow the setup guide, then compare again.':deckSyncResult?'Sync finished. Selected items were verified.':!comparison?'Next: compare to verify the game version.':deckNeedsLoader() && selectedDeckSyncOptions().loader && state.loader_installed===false?'Install BepInEx on your PC in Locations & setup, then compare again.':deckNeedsLoader() && !deckProtonState?.configured?'Next: Install BepInEx.':deckNeedsLoader() && !selectedDeckSyncOptions().loader && !deckProtonState?.loader_installed?'Deck loader files are missing. Include BepInEx & loaders, then compare again.':deckCanSync()?'Ready to sync. Review the selected file changes below.':'Selected files already match. Review any custom files below.';
   const disconnected=folders.host && (!session?.message || session.message==='Enter your Deck address to connect.')?'Your Deck address is saved. Connect to continue.':session?.message || 'Connect your Deck to unlock the next step.';
   $('deck-status').textContent=connected?`Connected to ${session.user}@${session.host}. ${next}`:session?.connected?'Connection details changed. Connect again to use this Deck.':disconnected;
 }
@@ -523,21 +567,22 @@ function compareView(result){
   if(result.game_version?.matched!==true || !result.game_version.build_id)throw new Error('The game version was not verified. Compare PC and Deck again.');
   comparison=result;deckSyncResult=null;deckComparisonFailure='';
   const unchanged=!Number(result.counts?.additions) && !Number(result.counts?.changes) && !Number(result.counts?.extras);
-  $('deck-comparison').innerHTML=`<h2>${unchanged?'Your managed mod files already match':'Review PC → Deck changes'}</h2><p class="green" role="status">Game version verified · Steam build ${esc(result.game_version.build_id)} on PC and Deck</p><div class="summary-chips"><span>${result.counts.additions} new</span><span>${result.counts.changes} changed</span><span>${result.counts.extras} extra on Deck</span><span>${result.counts.local_files} PC files</span></div>${result.unsupported?.length?`<p class="warning">These custom files need manual setup; full parity cannot be claimed:</p><details><summary>${result.unsupported.length} unsupported files</summary><pre>${esc(result.unsupported.join('\n'))}</pre></details>`:''}${unchanged?`<p>${result.unsupported?.length?'The supported files match. Handle the custom files listed above separately.':'Every supported mod file has the same hash on both devices. No transfer is needed.'}</p>`:`<details><summary>Review file differences</summary><pre>${esc(['ADD',...(result.additions || []),'\nREPLACE',...(result.changes || []),'\nBACK UP EXTRAS',...(result.extras || [])].join('\n'))}</pre></details><p class="footnote">Both games must be closed. Replaced and extra Deck files will be backed up. The game version is checked again before copying.</p>`}${result.warnings?.length?`<details class="guided-details"><summary>Sync notes</summary><ul>${result.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}`;
+  const displayItem=name=>name==='settings/game-preferences.json'?'Game preferences (audio & language)':name;
+  $('deck-comparison').innerHTML=`<h2>${unchanged?'Your selected setup already matches':'Review PC → Deck changes'}</h2><p class="green" role="status">Game version verified · Steam build ${esc(result.game_version.build_id)} on PC and Deck</p><p class="footnote">Selected: ${esc(deckSyncScope(result.options || selectedDeckSyncOptions()))}. Unselected groups stay unchanged.</p><div class="summary-chips"><span>${result.counts.additions} new</span><span>${result.counts.changes} changed</span><span>${result.counts.extras} extra on Deck</span><span>${result.counts.local_files} PC items</span></div>${result.unsupported?.length?`<p class="warning">These selected custom files need manual setup:</p><details><summary>${result.unsupported.length} unsupported files</summary><pre>${esc(result.unsupported.join('\n'))}</pre></details>`:''}${unchanged?`<p>${result.unsupported?.length?'The supported selected files match. Handle the custom files listed above separately.':'Every supported selected item matches on both devices. No transfer is needed.'}</p>`:`<details><summary>Review file differences</summary><pre>${esc(['ADD',...(result.additions || []).map(displayItem),'\nREPLACE',...(result.changes || []).map(displayItem),'\nBACK UP EXTRAS',...(result.extras || []).map(displayItem)].join('\n'))}</pre></details><p class="footnote">Both games must be closed. Replaced and extra files in the selected groups will be backed up. The game version is checked again before copying.</p>`}${result.warnings?.length?`<details class="guided-details"><summary>Sync notes</summary><ul>${result.warnings.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></details>`:''}`;
   renderDeckActions();
 }
 function deckComparisonError(error){comparison=null;deckSyncResult=null;deckComparisonFailure=error.message;$('deck-comparison').innerHTML=`<h2>Comparison stopped</h2><p class="warning" role="alert">${esc(error.message)}</p><p class="footnote">${/build|version/i.test(error.message)?'Finish Steam updates on both devices and use the same game branch. Check the selected folders if a game version is unknown.':'Check the connection and close both games, then compare again to get a fresh preview.'}</p>`;renderDeckActions();}
 function revealDeckComparison(){const card=$('deck-comparison');card.scrollIntoView({block:'start',behavior:'instant'});focusAfterWork(card.querySelector('h2'));}
-async function compareDeck(){resetDeckPreview();try{compareView(await api('deck-preview',{deck:deckFields()}));try{await configureDeckProton();}catch(error){toast('Game versions verified. BepInEx setup needs attention: '+error.message,true);}}catch(error){deckComparisonError(error);throw error;}finally{await refresh();revealDeckComparison();}}
+async function compareDeck(){if(!deckSelectionReady())throw new Error('Choose at least one sync group and save your choices before comparing.');resetDeckPreview();try{compareView(await api('deck-preview',{deck:deckFields(),options:{...selectedDeckSyncOptions()}}));if(deckNeedsLoader())try{await configureDeckProton();}catch(error){toast('Game versions verified. BepInEx setup needs attention: '+error.message,true);}}catch(error){deckComparisonError(error);throw error;}finally{await refresh();revealDeckComparison();}}
 async function syncDeck(){
   if(!comparison || !deckReady())throw new Error('Connect and compare your Deck before syncing.');
-  if(!deckCanSync())throw new Error('Compare matching game versions and prepare BepInEx before syncing. No transfer is needed if the managed files already match.');
+  if(!deckCanSync())throw new Error('Choose sync groups, compare matching game versions and prepare BepInEx when syncing mods or loaders. No transfer is needed if the selected files already match.');
   const plan=comparison;
   try{
-    const result=await api('deck-sync',{digest:plan.digest});comparison=null;deckSyncResult={plan,result};deckComparisonFailure='';
-    $('deck-comparison').innerHTML=`<div class="guided-result ${result.parity?'done':'action'}" role="status"><h2>${result.parity?'Sync complete · mod files match':'Sync complete · manual setup remains'}</h2><p>${Number(result.verified_files) || 0} supported mod files verified. ${result.parity?'PC and Deck now have matching managed mod files.':'Some custom files are outside automatic sync; review the details below.'}</p><p class="footnote">Your save files were not copied. ${result.backups?.length?'Replaced and extra Deck files were preserved in backups.':'No original files needed a backup.'} Launch the game on the Deck to confirm the mods load.</p></div><details class="guided-details"><summary>Sync details & backups</summary><pre>${esc(JSON.stringify(result,null,2))}</pre></details>`;
-    toast(result.parity?'Deck sync complete. Managed mod files match.':'Deck sync complete. Some custom files need manual setup.');
-    if(deckReady() && deckFields().game_path)try{await configureDeckProton();}catch(error){toast('Files synced. BepInEx setup needs attention: '+error.message,true);}
+    const result=await api('deck-sync',{digest:plan.digest,options:{...selectedDeckSyncOptions()}});comparison=null;deckSyncResult={plan,result};deckComparisonFailure='';
+    $('deck-comparison').innerHTML=`<div class="guided-result ${result.parity?'done':'action'}" role="status"><h2>${result.parity?'Sync complete · selected setup matches':'Sync complete · manual setup remains'}</h2><p>${Number(result.verified_files) || 0} selected items verified. ${result.parity?'The selected groups now match on PC and Deck.':'Some selected custom files are outside automatic sync; review the details below.'}</p><p class="footnote">Selected: ${esc(deckSyncScope(plan.options || selectedDeckSyncOptions()))}. Unselected groups and save files were not copied. ${result.backups?.length?'Replaced and extra Deck files were preserved in backups.':'No original files needed a backup.'}${deckNeedsLoader()?' Launch the game on the Deck to confirm the mods load.':''}</p></div><details class="guided-details"><summary>Sync details & backups</summary><pre>${esc(JSON.stringify(result,null,2))}</pre></details>`;
+    toast(result.parity?'Deck sync complete. Selected setup matches.':'Deck sync complete. Some selected custom files need manual setup.');
+    if(deckNeedsLoader() && deckReady() && deckFields().game_path)try{await configureDeckProton();}catch(error){toast('Files synced. BepInEx setup needs attention: '+error.message,true);}
   }catch(error){deckComparisonError(error);throw error;}
   finally{await refresh();renderDeckActions();revealDeckComparison();}
 }
@@ -557,6 +602,7 @@ document.addEventListener('click',event=>{
   if(target.hasAttribute('data-deck-guide'))$('deck-guide').onclick();
   if(target.dataset.page)page(target.dataset.page);
   if(target.dataset.details)details(target.dataset.details);
+  if(target.dataset.workshopApprove)workshopApproval(target.dataset.workshopApprove);
   if(target.dataset.profileDownload && !target.disabled)downloadProfileMod(target.dataset.profileDownload);
   if(target.dataset.profileWorkshop)openProfileWorkshop(target.dataset.profileWorkshop);
     if(target.hasAttribute('data-profile-zip'))$('import-zip').onclick();
@@ -572,7 +618,7 @@ document.addEventListener('click',event=>{
   if(target.id==='sync-now' && comparison && deckReady())work('Verifying game builds, then backing up and syncing Deck files…',syncDeck);
 });
 document.addEventListener('change',event=>{
-  if(event.target.dataset.toggle){const input=event.target;const desired=input.checked;input.checked=!desired;work('Saving mod state…',async()=>{const result=await api('toggle',{id:input.dataset.toggle,enabled:desired});await refresh();toast(result.message);});}
+  if(event.target.dataset.toggle){const input=event.target;setModEnabled(input.dataset.toggle,input.checked,input);}
 });
 $('close-dialog').onclick=()=>$('dialog').close();
 for(const id of ['search','source-filter','state-filter','category-filter'])$(id).addEventListener(id==='search'?'input':'change',renderMods);
@@ -604,6 +650,8 @@ $('foundation-install').onclick=()=>runSetup();
 $('workshop-loader-install').onclick=installWorkshopLoader;
 $('setup-zip').onclick=()=>setupArchive();
 $('deck-preview').onclick=()=>work('Verifying game builds, then comparing PC and Deck…',compareDeck);
+for(const key of Object.keys(deckSyncDefaults))$('deck-sync-'+key).addEventListener('change',changeDeckSyncOptions);
+$('deck-sync-options-save').onclick=saveDeckSyncOptions;
 $('deck-proton-check').onclick=()=>work('Checking BepInEx loading on Deck…',async()=>{await configureDeckProton();toast(deckProtonState?.configured && deckProtonState?.loader_installed?'BepInEx loading and files are ready.':deckProtonState?.configured?'BepInEx loading is configured. Sync to copy the missing files.':'BepInEx loading needs setup. Compare, then Install BepInEx.');});
 $('deck-proton-setup').onclick=()=>work('Backing up and configuring BepInEx loading on Deck…',()=>configureDeckProton(true));
 $('deck-connect').onclick=async()=>{

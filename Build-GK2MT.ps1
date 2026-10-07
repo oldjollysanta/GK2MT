@@ -13,6 +13,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install build dependencies.' }
 & $buildPython -m PyInstaller --noconfirm --clean --onefile --windowed --name GK2MT `
     --add-data 'web;web' --add-data 'DECK-SETUP.md;.' `
     --add-data 'deck.py;.' --add-data 'deck_discovery.py;.' --add-data 'deck_proton.py;.' `
+    --add-data 'deck_game_settings.py;.' `
     --copy-metadata pywebview --collect-data webview --hidden-import webview.platforms.winforms `
     --hidden-import webview.platforms.edgechromium app.py
 if ($LASTEXITCODE -ne 0) { throw 'Executable build failed.' }

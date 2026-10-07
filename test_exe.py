@@ -21,7 +21,7 @@ def check_archive(executable):
         assert binary.OPTIONAL_HEADER.Subsystem == 2, 'Must be a Windows GUI executable, not a console server.'
     archive = CArchiveReader(str(executable))
     names = {name.replace('\\', '/'): name for name in archive.toc}
-    for name in ('deck.py', 'deck_discovery.py', 'deck_proton.py', 'DECK-SETUP.md',
+    for name in ('deck.py', 'deck_discovery.py', 'deck_proton.py', 'deck_game_settings.py', 'DECK-SETUP.md',
                  'web/index.html', 'web/app.js', 'web/setup.js', 'web/style.css',
                  'web/guided.css', 'web/banner.png'):
         assert archive.extract(names[name]) == (ROOT / name).read_bytes(), name + ' is stale or missing'

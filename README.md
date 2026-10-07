@@ -38,7 +38,7 @@ The desktop build runs as a single **GK2MT.exe** with its own window, native fil
 | **Duplicate warnings** | Warns before installing another Steam/Nexus copy of a plugin, including disabled copies, and highlights existing duplicates. |
 | **File conflict review & rules** | Reviews all selected ZIPs together, names active and disabled copies, and requires a choice for differing shared files. Identical files stay shared. Installed package rules handle file overlaps; runtime mod compatibility still needs checking. |
 | **Mod profiles** | Saves and shares mod selections. A guided checklist resolves missing mods and release differences before you review and apply enable/disable changes. |
-| **Steam Deck sync** | Connects by SSH, detects Deck folders, verifies matching game builds, previews mod differences, backs up files, syncs PC → Deck, and verifies hashes. |
+| **Steam Deck sync** | Connects by SSH, verifies matching game builds, and syncs your saved selection of mods, configs, approvals, loaders, and optional game preferences, with backups and hash verification. |
 | **Everyday controls** | Launches through Steam, rescans installed mods, reversibly enables/disables supported mods, and reviews Nexus/manual uninstalls with recovery backups. |
 | **Private credentials** | Optionally remembers Nexus keys and Deck passwords using Windows account encryption. Profiles and mod syncs exclude credentials. |
 
@@ -115,6 +115,8 @@ The flow is **Check mods → Get mods ready → Review & apply**. Missing Nexus 
 On the Deck, set a system password if needed, enable SSH, and find its IP. GK2MT handles the Windows SSH connection and can remember the address and optionally encrypt the system password.
 
 The page guides **Connect → Compare → BepInEx → Deck Sync**. Comparison first checks that PC and Deck have the same installed Steam game build. GK2MT installs and configures BepInEx on your Deck automatically through setup and sync, with no manual Steam launch options. [How it works: Proton DLL override](DECK-SETUP.md#game-setup-enable-bepinex-through-proton). Mod transfers include backups and hash verification. Game saves remain managed by Steam Cloud.
+
+Expand **What to sync** below the main buttons to choose mods, mod configs, Workshop approvals, BepInEx/loaders, and optional game preferences. Choices save automatically between launches; unchecked groups stay unchanged on the Deck. Game preferences copy audio, language, and voice settings while preserving the Deck's display and controls. Change a selection, then compare again before syncing.
 
 The Deck uses the Windows game and mods through Proton. Launch it once to create the Proton environment before setup. See the [Deck setup guide](DECK-SETUP.md) for commands and troubleshooting. Deck workflows have fixture and SSH test coverage; the screenshot below uses a simulated connection, and physical Deck validation remains separate.
 

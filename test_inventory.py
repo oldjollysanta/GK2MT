@@ -208,21 +208,39 @@ def check():
         assert flat["enabled"] and flat["can_toggle"] and flat["status"] == "Approved · deployed"
         collection = next(row for row in rows if row["id"] == "workshop:500")
         assert not collection["enabled"] and collection["can_toggle"] and collection["trust_state"] == "no"
+        assert not collection["approval_required"]
         notepad = next(row for row in rows if row["id"] == "workshop:600")
         assert not notepad["enabled"] and not notepad["can_toggle"]
+        assert not notepad["approval_required"]
         assert notepad["status"] == "Skipped · no BepInEx plugin" and notepad["trust_state"] == "ask"
         translation = next(row for row in rows if row["id"] == "workshop:700")
         assert not translation["can_toggle"]
         assert not toggle(game, workshop, flat, False)["enabled"]
         assert "400 = BLOCKED" in (game / TRUST).read_text()
-        pending = toggle(game, workshop, flat, True)
+        assert "previous-approved-sha256=" + approved_hash in (game / TRUST).read_text()
+        before = (game / TRUST).read_bytes()
+        toggle(game, workshop, flat, False)
+        assert (game / TRUST).read_bytes() == before, 'Repeated disable lost the original approval.'
+        # The loader removes the blocked mirror at launch. It still owns deployment.
+        (game / "BepInEx/plugins/_Workshop/400/Flat.dll").unlink()
+        restored = toggle(game, workshop, flat, True)
+        assert restored["trust_state"] == "yes" and not restored["approval_required"]
+        assert not restored["enabled"] and restored["status"] == "Approved · deploys on next launch"
+        assert "400 = " + approved_hash in (game / TRUST).read_text()
+        # Updating a blocked source must never create a new content approval.
+        toggle(game, workshop, restored, False)
+        put(workshop, "400/Flat.dll", "BepInPlugin\0 changed code")
+        toggle(game, workshop, restored, True)
+        assert "400 = " + approved_hash in (game / TRUST).read_text(), 'Re-enable replaced the loader approval hash.'
+        pending = toggle(game, workshop, collection, True)
         assert not pending["enabled"] and pending["trust_state"] == "ask"
+        assert pending["approval_required"], 'Unblocked is awaiting approval, not disabled.'
         assert pending["status"] == "Approval required on next launch"
         content = (game / TRUST).read_text()
-        assert "400 =" not in content and approved_hash not in content
-        assert "# Keep comment" in content and "500 = BLOCKED" in content
-        toggle(game, workshop, collection, True)
-        assert "500 =" not in (game / TRUST).read_text()
+        assert "500 =" not in content
+        assert "# Keep comment" in content and "400 = " + approved_hash in content
+        put(game, TRUST, content + "500 = BLOCKED # previous-approved-sha256=invalid\n")
+        assert toggle(game, workshop, collection, True)["approval_required"], 'A malformed remembered hash was accepted.'
         try:
             toggle(game, workshop, notepad, True)
         except ValueError:

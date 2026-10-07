@@ -415,6 +415,7 @@ def scan(game: Path, workshop: Path) -> list[dict]:
         row["trust_state"] = decision
         row["loader_kind"] = loader["kind"]
         row["can_toggle"] = loader["kind"] in {"workshop", "legacy"} and supported
+        row["approval_required"] = loader["kind"] == "workshop" and supported and decision == "ask"
         row["workshop_paths"] = [path.relative_to(workshop).as_posix() for path in payload]
         if decision == "no":
             row.update(enabled=False, status="Blocked · applies on next launch")
@@ -479,14 +480,20 @@ def toggle(game: Path, workshop: Path, row: dict, enabled: bool) -> dict:
             raise ValueError("Workshop trust path contains a link or leaves the game folder.")
         item_id = current["workshop_id"]
         if current["loader_kind"] == "workshop":
-            # The new loader has no 'ask' token: remove BLOCKED to ask again.
-            # Never create an approval hash or translate a legacy approval.
+            # Keep the loader's original approval while blocked. Restoring that
+            # hash never approves an update: the loader rechecks content at launch.
+            previous = _trust(game, "workshop").get(item_id, [])
+            remembered = re.search(r"\bprevious-approved-sha256=([0-9a-fA-F]{64})(?:\s|;|$)", previous[3]) if previous else None
+            approved = previous[1] if current["trust_state"] == "yes" else remembered.group(1) if remembered else None
             if enabled and current["trust_state"] == "yes":
                 return current
             lines = [line for line in _text(path).splitlines()
                      if not re.match(r"^\s*" + re.escape(item_id) + r"\s*=", line)]
-            if not enabled:
-                lines.append(f"{item_id} = BLOCKED # GK2MT: disabled on next launch")
+            if enabled and approved:
+                lines.append(f"{item_id} = {approved.lower()} # GK2MT: previous approval restored; checked by loader on next launch")
+            elif not enabled:
+                note = f"; previous-approved-sha256={approved.lower()}" if approved else ""
+                lines.append(f"{item_id} = BLOCKED # GK2MT: disabled on next launch{note}")
         else:
             previous = _trust(game, "legacy").get(item_id, [item_id, "", "ask", current["name"], ""])
             previous += [""] * (5 - len(previous))

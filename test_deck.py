@@ -85,7 +85,7 @@ def check():
                 return deck.game_build(remote, "Deck")
             if message["action"] == "preview":
                 deck._require_build(remote, message["build"], "Deck")
-                return deck._inventory(remote, remote_workshop)
+                return deck._inventory(remote, remote_workshop, message.get("options"))
             archive.seek(0)
             return deck._apply(remote, remote_workshop, message, archive)
 

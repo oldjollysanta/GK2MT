@@ -55,6 +55,37 @@ def main():
             assert app.DATA == data and loader_target.read_bytes() == loader_source.read_bytes()
             setup_checkpoint.update(hash=app.manager.digest(loader_target), mtime=loader_target.stat().st_mtime_ns)
             return {}
+        if action == '__test_prepare_workshop_mod':
+            assert app.DATA == data and app.settings()['workshop'] == str(workshop)
+            assert loader_target.exists() and not workshop_plugin.exists() and not workshop_mirror.exists()
+            setup_checkpoint['trust'] = loader_trust.read_bytes()
+            workshop_plugin.parent.mkdir()
+            workshop_plugin.write_bytes(b'BepInPlugin\0')
+            loader_trust.write_bytes(setup_checkpoint['trust'] + b'123 = BLOCKED\n')
+            return {}
+        if action == '__test_approve_workshop_mod':
+            assert app.DATA == data and app.settings()['game'] == str(game)
+            assert app.row_by_id('workshop:123')['approval_required']
+            assert loader_trust.read_bytes() == setup_checkpoint['trust'], 'Unblocking silently approved the mod.'
+            loader_trust.write_bytes(setup_checkpoint['trust'] + b'123 = ' + b'a' * 64 + b'\n')
+            workshop_mirror.parent.mkdir(parents=True)
+            workshop_mirror.write_bytes(workshop_plugin.read_bytes())
+            return {}
+        if action == '__test_blocked_workshop_launch':
+            assert app.DATA == data and app.row_by_id('workshop:123')['trust_state'] == 'no'
+            assert b'previous-approved-sha256=' + b'a' * 64 in loader_trust.read_bytes()
+            workshop_mirror.unlink()
+            return {}
+        if action == '__test_cleanup_workshop_mod':
+            assert app.DATA == data and app.settings()['game'] == str(game)
+            workshop_plugin.unlink()
+            workshop_plugin.parent.rmdir()
+            if workshop_mirror.exists():
+                workshop_mirror.unlink()
+            workshop_mirror.parent.rmdir()
+            workshop_mirror.parent.parent.rmdir()
+            loader_trust.write_bytes(setup_checkpoint['trust'])
+            return {}
         if action == '__test_import_packages':
             assert app.DATA == data and app.settings()['game'] == str(game)
             shared.parent.mkdir(parents=True)
@@ -78,10 +109,11 @@ def main():
         data, game, workshop = folder / 'data', folder / 'game', folder / '4358690'
         for path in (data, game, workshop):
             path.mkdir()
-        settings = {'game': str(game), 'workshop': str(workshop), 'import_folder': str(folder / 'imports')}
+        settings = {'game': str(game), 'workshop': str(workshop), 'import_folder': str(folder / 'imports'),
+                    'quick_setup_completed': True, 'workshop_enabled': True,
+                    'deck': app.DECK_DEFAULTS.copy(), 'deck_sync_options': app.deck.DEFAULT_OPTIONS.copy()}
         settings_file = data / 'settings.json'
         settings_file.write_text(json.dumps(settings), encoding='utf-8')
-        saved_settings = settings_file.read_bytes()
         executable = game / 'GraveyardKeeper2.exe'
         plugin = game / 'BepInEx/plugins/FixtureUninstall/Main.dll'
         preserved = plugin.parent / 'settings.cfg'
@@ -89,6 +121,8 @@ def main():
         loader_source = data / 'fixture-github-loader.dll'
         loader_config = game / 'BepInEx/config/GK2_WorkshopLoader.cfg'
         loader_trust = game / app.inventory.TRUST
+        workshop_plugin = workshop / '123/MoveBuildings.dll'
+        workshop_mirror = game / 'BepInEx/plugins/_Workshop/123/MoveBuildings.dll'
         shared = game / 'BepInEx/plugins/Native/shared.json'
         untouched = folder / 'untouched.txt'
         untouched.write_text('Outside the mod folder', encoding='utf-8')
@@ -168,6 +202,33 @@ def main():
         await new Promise(resolve => setTimeout(resolve, 30));
       }
     };
+    page('deck');
+    const syncChoices = document.getElementById('deck-sync-options');
+    syncChoices.open = true;
+    syncChoices.scrollIntoView({block:'center'});
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    const choiceBounds = syncChoices.getBoundingClientRect();
+    check(choiceBounds.left >= 0 && choiceBounds.right <= innerWidth + 1 &&
+          document.documentElement.scrollWidth <= innerWidth + 1 &&
+          getComputedStyle(document.getElementById('deck-sync-mods')).width === '19px',
+          'The sync selection controls overflowed or stretched their checkboxes');
+    for(const key of Object.keys(deckSyncDefaults))document.getElementById('deck-sync-'+key).checked=key==='configs';
+    document.getElementById('deck-sync-mods').dispatchEvent(new Event('change',{bubbles:true}));
+    await waitUntil(() => !working && !deckSyncOptionsSaving && state.settings.deck_sync_options.mods===false,
+                    'Saving configs-only sync choices did not finish');
+    check(state.settings.deck_sync_options.configs && !state.settings.deck_sync_options.approvals &&
+          document.getElementById('deck-sync-options-status').textContent.includes('saved automatically') &&
+          document.getElementById('deck-sync-options-summary').textContent==='mod configs' &&
+          document.getElementById('deck-preview').disabled,
+          'Saved scope or disconnected comparison controls were incorrect');
+    deckSyncOptions=null;renderDeckSyncOptions();
+    check(document.getElementById('deck-sync-configs').checked && !document.getElementById('deck-sync-mods').checked,
+          'An initial render did not restore the saved sync preference');
+    for(const [key,value] of Object.entries(deckSyncDefaults))document.getElementById('deck-sync-'+key).checked=value;
+    document.getElementById('deck-sync-mods').dispatchEvent(new Event('change',{bubbles:true}));
+    await waitUntil(() => !working && !deckSyncOptionsSaving && state.settings.deck_sync_options.mods===true,
+                    'Restoring the fixture default sync choices did not finish');
+    page('mods');
     check(!state.duplicates.length && document.getElementById('duplicates-banner').hidden,
           'A single manual fixture produced a duplicate warning');
     const fixtureName = state.mods[0].name;
@@ -291,7 +352,67 @@ def main():
     await refresh();
     check(state.workshop_setup.installed && document.getElementById('workshop-setup-banner').hidden,
           'Repeated setup lost the installed state');
+    await api('__test_prepare_workshop_mod', {});
+    await refresh();
     page('mods');
+    const workshopRow = () => state.mods.find(mod => mod.id === 'workshop:123');
+    const workshopCheckbox = () => document.querySelector('[data-toggle="workshop:123"]');
+    check(workshopRow() && !workshopRow().enabled && !workshopRow().approval_required &&
+          !workshopCheckbox().checked, 'The Workshop fixture was not initially blocked');
+    workshopCheckbox().click();
+    check(workshopCheckbox().checked && !workshopCheckbox().indeterminate,
+          'The enable click was unticked while its save was in progress');
+    await waitUntil(() => !working && workshopRow()?.approval_required &&
+                         document.getElementById('dialog-title').textContent === 'Finish enabling Workshop mod',
+                    'Re-enabling did not show the pending approval guide');
+    const pendingCheckbox = workshopCheckbox(), dash = getComputedStyle(pendingCheckbox, '::after');
+    check(pendingCheckbox.checked && pendingCheckbox.indeterminate &&
+          pendingCheckbox.getAttribute('aria-checked') === 'mixed' &&
+          dash.height === '0px' && dash.transform === 'none' &&
+          document.querySelector('[data-workshop-approve="workshop:123"]') &&
+          pendingCheckbox.closest('tr').textContent.includes('Unblocked · approval needed'),
+          'Pending approval did not render a mixed checkbox, clear status and launch action');
+    check(actionButton('Launch to approve') && document.getElementById('dialog-body').textContent.includes('Rescan'),
+          'The approval guide omitted its launch or refresh steps');
+    actionButton('Later').click();
+    workshopCheckbox().click();
+    await waitUntil(() => !working && workshopRow()?.trust_state === 'no',
+                    'Clicking the mixed checkbox did not block the mod again');
+    check(!workshopCheckbox().checked && !workshopCheckbox().indeterminate &&
+          !document.querySelector('[data-workshop-approve="workshop:123"]'),
+          'Blocking did not restore the unchecked state');
+    workshopCheckbox().click();
+    await waitUntil(() => !working && workshopRow()?.approval_required &&
+                         document.getElementById('dialog').open, 'The second re-enable did not finish');
+    actionButton('Later').click();
+    document.querySelector('[data-workshop-approve="workshop:123"]').click();
+    check(document.getElementById('dialog').open && actionButton('Launch to approve'),
+          'The row launch action did not reopen the approval guide');
+    actionButton('Later').click();
+    await api('__test_approve_workshop_mod', {});
+    await refresh();
+    check(workshopRow().enabled && !workshopRow().approval_required &&
+          workshopCheckbox().checked && !workshopCheckbox().indeterminate &&
+          !document.querySelector('[data-workshop-approve="workshop:123"]'),
+          'A loader approval and deployment did not become a normal enabled checkbox');
+    workshopCheckbox().click();
+    await waitUntil(() => !working && workshopRow()?.trust_state === 'no',
+                    'Disabling the approved mod did not finish');
+    await api('__test_blocked_workshop_launch', {});
+    await refresh();
+    workshopCheckbox().click();
+    check(workshopCheckbox().checked && !workshopCheckbox().indeterminate,
+          'Re-enabling a previously approved mod did not tick immediately');
+    await waitUntil(() => !working && workshopRow()?.trust_state === 'yes',
+                    'Re-enabling did not restore the original approval');
+    check(!workshopRow().enabled && !workshopRow().approval_required &&
+          workshopCheckbox().checked && !workshopCheckbox().indeterminate &&
+          !document.getElementById('dialog').open &&
+          !document.querySelector('[data-workshop-approve="workshop:123"]') &&
+          workshopCheckbox().closest('tr').textContent.includes('Approved · deploys on next launch'),
+          'Restored approval did not stay selected without asking again after its mirror was removed');
+    await api('__test_cleanup_workshop_mod', {});
+    await refresh();
     const zipped = await api('__test_import_packages', {});
     await reviewPackages(zipped.packages);
     check(document.getElementById('dialog-title').textContent === 'Review ZIP installation' &&
@@ -322,7 +443,7 @@ def main():
           !state.conflicts.some(conflict => !conflict.identical),
           'Batch result did not render the installed packages and resolved file choices');
     await pywebview.api.request('__test_report', {ok: true, bannerWidth: banner.naturalWidth,
-      profileApplied: true, uninstalled: true, workshopInstalled: true, batchInstalled: true});
+      profileApplied: true, uninstalled: true, workshopInstalled: true, workshopReenabled: true, batchInstalled: true, syncChoicesSaved: true});
   })().catch(error => pywebview.api.request('__test_report', {ok: false, error: String(error.stack || error)}));
 })();
 """.replace('EXPECTED', expected)
@@ -338,7 +459,9 @@ def main():
                         assert result.get('profileApplied'), 'The real profile workflow did not complete.'
                         assert result.get('uninstalled'), 'The real uninstall workflow did not complete.'
                         assert result.get('workshopInstalled'), 'The real Workshop setup workflow did not complete.'
+                        assert result.get('workshopReenabled'), 'The real Workshop re-enable workflow did not complete.'
                         assert result.get('batchInstalled'), 'The real ZIP batch workflow did not complete.'
+                        assert result.get('syncChoicesSaved'), 'The real saved sync selection workflow did not complete.'
                         assert not private_calls, 'Raw messages reached a private Python method.'
                         assert webview.http.global_server is None, 'A web server was started.'
                         break
@@ -374,7 +497,7 @@ def main():
             raise errors[0]
         assert app.WINDOW is None and app.DECK_SESSION is None and not app.NEXUS_KEY
         assert not (data / 'nexus-key.bin').exists()
-        assert settings_file.read_bytes() == saved_settings, 'The read-only checks changed settings.'
+        assert json.loads(settings_file.read_text('utf-8')) == settings, 'The native checks changed unrelated settings.'
         assert not plugin.exists(), 'Confirmed uninstall left the plugin installed.'
         assert preserved.read_text(encoding='utf-8') == 'Personal fixture settings', 'Uninstall removed mod settings.'
         assert executable.read_bytes() == b'GK2MT test fixture; not an executable', 'Uninstall changed the game file.'
@@ -399,7 +522,7 @@ def main():
             'BepInEx/plugins/Native/common.txt', 'BepInEx/plugins/Native/shared.json',
             app.inventory.TRUST, *app.BEPINEX_FILES}, 'Setup or uninstall changed unexpected fixture files.'
         assert shared.read_bytes() == b'Native B', 'Batch did not install the selected shared file.'
-    print('Native desktop checks passed: serverless shell, profile/uninstall/setup workflows, ZIP batch choice/cancel/install/layout, and clean shutdown.')
+    print('Native desktop checks passed: serverless shell, saved Deck sync choices, profile/uninstall/setup workflows, Workshop checkbox states, ZIP install/layout, and clean shutdown.')
 
 
 if __name__ == '__main__':

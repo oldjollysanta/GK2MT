@@ -17,8 +17,8 @@ API = 'https://api.nexusmods.com/v1'
 GAME = 'graveyardkeeper2'
 SETUP_MOD = 48
 SETUP_URL = f'https://www.nexusmods.com/{GAME}/mods/{SETUP_MOD}?tab=files'
-HEADERS = {'User-Agent': 'GK2MT/0.1.2', 'Application-Name': 'GK2MT',
-           'Application-Version': '0.1.2', 'Accept': 'application/json'}
+HEADERS = {'User-Agent': 'GK2MT/0.1.3', 'Application-Name': 'GK2MT',
+           'Application-Version': '0.1.3', 'Accept': 'application/json'}
 ROOT_FILES = {'winhttp.dll', 'doorstop_config.ini', '.doorstop_version', 'changelog.txt'}
 REQUIRED = ['winhttp.dll', 'doorstop_config.ini', '.doorstop_version',
             'BepInEx/plugins/ConfigurationManager/ConfigurationManager.dll'] + [

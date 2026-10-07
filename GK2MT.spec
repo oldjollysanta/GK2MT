@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import copy_metadata
 
-datas = [('web', 'web'), ('DECK-SETUP.md', '.'), ('deck.py', '.'), ('deck_discovery.py', '.'), ('deck_proton.py', '.')]
+datas = [('web', 'web'), ('DECK-SETUP.md', '.'), ('deck.py', '.'), ('deck_discovery.py', '.'), ('deck_proton.py', '.'), ('deck_game_settings.py', '.')]
 datas += collect_data_files('webview')
 datas += copy_metadata('pywebview')
 

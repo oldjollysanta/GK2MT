@@ -738,6 +738,51 @@ def workshop_setup_actions():
     print('Workshop first-run bridge passed: explicit install, managed ownership and download guards.')
 
 
+def workshop_reenable_actions():
+    from test_workshop_setup import fixture, pe_dll
+    from test_inventory import put
+    with TemporaryDirectory() as temporary:
+        game, workshop, data, loader = fixture(Path(temporary))
+        put(game, app.integrations.WORKSHOP_TARGET, '')
+        loader.write_bytes(pe_dll())
+        put(workshop, '123/MoveBuildings.dll', 'BepInPlugin\0')
+        trust = put(game, inventory.TRUST, '# Keep other decisions\n123 = BLOCKED\n456 = BLOCKED\n')
+        with patch.object(app, 'DATA', data), patch.object(app, 'DECK_SESSION', None), \
+             patch.object(app, 'UPDATES', None), patch.object(app, 'PREVIEW', {'old': True}), \
+             patch.object(manager, 'ensure_game_stopped'), patch.object(app.webbrowser, 'open') as launch:
+            manager.save_json(data / 'settings.json', {'game': str(game), 'workshop': str(workshop)})
+            result = app.dispatch('toggle', {'id': 'workshop:123', 'enabled': True})
+            assert result['approval_required'] and result['mod_name'] == 'MoveBuildings'
+            assert 'unblocked' in result['message'] and 'approve' in result['message']
+            current = app.row_by_id('workshop:123')
+            assert current['approval_required'] and not current['enabled'] and current['trust_state'] == 'ask'
+            assert '123 =' not in trust.read_text() and '456 = BLOCKED' in trust.read_text()
+            assert app.PREVIEW is None
+            launch.assert_not_called()
+            # Repeated enable requests do not grant consent or install any plugin.
+            before = trust.read_bytes()
+            assert app.dispatch('toggle', {'id': 'workshop:123', 'enabled': True})['approval_required']
+            assert trust.read_bytes() == before and not current['paths']
+            app.dispatch('toggle', {'id': 'workshop:123', 'enabled': False})
+            assert app.row_by_id('workshop:123')['trust_state'] == 'no'
+            assert not app.row_by_id('workshop:123')['approval_required']
+            # Simulate the loader's explicit user approval and deployment after launch.
+            trust.write_text('123 = ' + 'a' * 64 + '\n456 = BLOCKED\n')
+            put(game, 'BepInEx/plugins/_Workshop/123/MoveBuildings.dll', 'BepInPlugin\0')
+            current = app.row_by_id('workshop:123')
+            assert current['enabled'] and not current['approval_required']
+            app.dispatch('toggle', {'id': current['id'], 'enabled': False})
+            assert 'previous-approved-sha256=' + 'a' * 64 in trust.read_text()
+            (game / current['paths'][0]).unlink()
+            result = app.dispatch('toggle', {'id': current['id'], 'enabled': True})
+            assert not result.get('approval_required') and 'previous approval is kept' in result['message']
+            current = app.row_by_id('workshop:123')
+            assert current['trust_state'] == 'yes' and not current['approval_required'] and not current['paths']
+            assert '123 = ' + 'a' * 64 in trust.read_text() and '456 = BLOCKED' in trust.read_text()
+            launch.assert_not_called()
+    print('Workshop re-enable passed: remembered original approval, no new content approval/launch, missing mirror, first approval guide and block again.')
+
+
 def github_foundation_actions():
     with TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -794,6 +839,7 @@ def main():
     nexus_actions()
     workshop_actions()
     workshop_setup_actions()
+    workshop_reenable_actions()
     github_foundation_actions()
     uninstall_actions()
     cached_update_actions()

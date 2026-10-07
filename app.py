@@ -51,6 +51,7 @@ def settings():
     saved['quick_setup_completed'] = saved.get('quick_setup_completed') is True
     saved['workshop_enabled'] = saved.get('workshop_enabled', True) is True
     saved['deck'] = {key: saved.get('deck', {}).get(key, default) for key, default in DECK_DEFAULTS.items()}
+    saved['deck_sync_options'] = deck.normalize_options(saved.get('deck_sync_options'), allow_empty=True)
     return saved
 
 
@@ -564,7 +565,7 @@ def snapshot():
             'workshop_loader': inventory.loader_info(game), 'workshop_setup': workshop_setup(config),
             'game_found': (game / 'GraveyardKeeper2.exe').exists(), 'nexus_connected': bool(NEXUS_KEY),
             'nexus_saved': (DATA / 'nexus-key.bin').is_file(), 'nexus_error': NEXUS_ERROR,
-            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.2',
+            'updates': UPDATES, 'data_path': str(DATA), 'version': '0.1.3',
             'deck_connection': deck_connection(config), **download_state()}
 
 
@@ -1352,7 +1353,14 @@ def dispatch(action, body):
         if row['source'] == 'GK2MT':
             package_manager(config).set_enabled(row['id'], body['enabled'])
         else:
-            inventory.toggle(game, workshop, row, bool(body['enabled']))
+            changed = inventory.toggle(game, workshop, row, bool(body['enabled']))
+            if changed.get('approval_required'):
+                PREVIEW = None
+                return {'approval_required': True, 'mod_name': row['name'],
+                        'message': row['name'] + ' is unblocked. Launch the game and approve it in the Workshop loader to finish enabling it.'}
+            if body['enabled'] and changed.get('loader_kind') == 'workshop' and changed.get('trust_state') == 'yes':
+                PREVIEW = None
+                return {'message': row['name'] + ' is enabled for the next game launch. Its previous approval is kept; the loader will ask again only if the files changed.'}
         PREVIEW = None
         return {'message': 'Mod state saved. Workshop changes take effect when the game next starts.'}
     if action == 'uninstall-preview':
@@ -1521,6 +1529,13 @@ def dispatch(action, body):
     if action == 'deck-disconnect':
         disconnect_deck()
         return {'connected': False, 'message': DECK_MESSAGE}
+    if action == 'deck-sync-options':
+        options = deck.normalize_options(body.get('options'), allow_empty=True)
+        if options != config['deck_sync_options']:
+            PREVIEW = None
+            config['deck_sync_options'] = options
+            manager.save_json(DATA / 'settings.json', config)
+        return {'options': options, 'message': 'Sync selection saved. Compare again to review these changes.'}
     if action in ('deck-proton-status', 'deck-proton-setup'):
         target = deck._settings(body.get('deck', config['deck']), require_paths=False)
         changed = target != config['deck']
@@ -1535,22 +1550,28 @@ def dispatch(action, body):
             manager.save_json(DATA / 'settings.json', config)
         return deck.configure_proton(config['deck'], connection, install=install)
     if action == 'deck-preview':
+        options = deck.normalize_options(body.get('options', config['deck_sync_options']))
         connection_settings = deck._settings(body.get('deck', config['deck']))
         config['deck'] = connection_settings
+        config['deck_sync_options'] = options
         connection = require_deck(config)
         manager.ensure_game_stopped()
         PREVIEW = None
         manager.save_json(DATA / 'settings.json', config)
-        PREVIEW = deck.preview(game, workshop, config['deck'], connection=connection)
+        PREVIEW = deck.preview(game, workshop, config['deck'], connection=connection, options=options)
         return PREVIEW
     if action == 'deck-sync':
+        options = deck.normalize_options(body.get('options', config['deck_sync_options']))
         connection = require_deck(config)
         manager.ensure_game_stopped()
         if not PREVIEW or body.get('digest') != PREVIEW['digest']:
             raise ValueError('Compare PC and Deck again before syncing.')
+        if options != deck.normalize_options(PREVIEW.get('options')):
+            PREVIEW = None
+            raise ValueError('Your sync selection changed. Compare PC and Deck again before syncing.')
         digest = PREVIEW['digest']
         PREVIEW = None
-        return deck.sync(game, workshop, config['deck'], digest, connection=connection)
+        return deck.sync(game, workshop, config['deck'], digest, connection=connection, options=options)
     raise ValueError('Unknown action.')
 
 

@@ -13,7 +13,7 @@ const $ = id => {
     nodes.set(id, {get value() { return value; }, set value(v) { value = String(v); },
       textContent: '', innerHTML: '', classList: {toggle() {}}, close() {},
       checked:id==='nexus-remember',events:new Map(),addEventListener(event,callback){this.events.set(event,callback);},
-      focus(){},scrollIntoView(){},querySelector(){return {focus(){}};},
+      focus(){},scrollIntoView(){},querySelector(){return {focus(){}};},querySelectorAll(){return [];},
       insertAdjacentHTML(_, html) { this.innerHTML += html; }});
   }
   return nodes.get(id);
@@ -124,6 +124,66 @@ function modSourceChecks() {
   const filter=html.match(/<select id="source-filter"[^>]*>(.*?)<\/select>/)[1];
   assert.equal(filter,'<option value="">All sources</option><option>Steam</option><option>Nexus</option><option>Manual</option>');
   assert.match(html,/<th>Source<\/th>/);
+}
+
+async function workshopReenableChecks(){
+  const elements=new Map(),pendingInput={checked:true,indeterminate:false,dataset:{toggle:'steam',approvalPending:''}};
+  const node=id=>{if(!elements.has(id))elements.set(id,{value:'',innerHTML:'',textContent:'',close(){},querySelectorAll(){return this.innerHTML.includes('data-approval-pending')?[pendingInput]:[];}});return elements.get(id);};
+  const fixture={mods:[{id:'steam',name:'Move <Buildings>',source:'Steam Workshop',workshop_id:'123',enabled:false,approval_required:false,can_toggle:true,status:'Blocked'},
+    {id:'ready',name:'Ready mod',source:'Manual',enabled:true},{id:'off',name:'Disabled mod',source:'Manual',enabled:false}]};
+  const calls=[],messages=[];let shown,changeHandler,error,completeSave;
+  const ui=vm.createContext({$:node,state:fixture,working:false,modal(...args){shown=args;},toast:message=>messages.push(message),work:async(_,task)=>{try{return await task();}catch(failure){messages.push(failure.message);return null;}},
+    refresh:async()=>execute('renderMods()'),document:{addEventListener(event,handler){if(event==='change')changeHandler=handler;}},
+    api:async(action,body)=>{calls.push([action,body]);if(error)throw error;if(action==='launch')return {message:'Launch requested'};
+      if(completeSave)await new Promise(resolve=>completeSave=resolve);
+      assert.equal(action,'toggle');fixture.mods[0].approval_required=body.enabled;
+      return body.enabled?{approval_required:true,mod_name:fixture.mods[0].name,message:'Unblocked; approve on launch'}:{message:'Blocked'};}});
+  const execute=script=>vm.runInContext(script,ui);
+  execute(source.slice(source.indexOf('const escapeHTML'),source.indexOf('function actionCard')));
+  execute(source.slice(source.indexOf('function modDuplicates'),source.indexOf('function details')));
+  execute(source.slice(source.indexOf("document.addEventListener('change'"),source.indexOf("$('close-dialog').onclick")));
+  execute('renderMods()');assert.doesNotMatch(node('mod-list').innerHTML,/data-workshop-approve/);
+  await execute('setModEnabled("steam",true)');
+  assert.equal(calls.length,1,'enable does not launch the game or approve code automatically');
+  assert.equal(shown[0],'Finish enabling Workshop mod');assert.match(shown[1],/Move &lt;Buildings&gt;/);
+  assert.match(node('mod-list').innerHTML,/Unblocked · approval needed/);assert.match(node('mod-list').innerHTML,/aria-checked="mixed"/);
+  assert.equal(pendingInput.indeterminate,true);assert.equal(pendingInput.checked,true);
+  assert.match(node('mod-list').innerHTML,/data-workshop-approve="steam"/);
+  node('state-filter').value='pending';execute('renderMods()');assert.equal(node('list-count').textContent,1);
+  node('state-filter').value='disabled';execute('renderMods()');assert.equal(node('list-count').textContent,1,'pending is separate from blocked');
+  node('state-filter').value='enabled';execute('renderMods()');assert.equal(node('list-count').textContent,1,'pending is not counted as loaded');
+  node('state-filter').value='';
+  await shown[2].find(action=>action[0]==='Launch to approve')[1]();
+  assert.equal(calls.at(-1)[0],'launch','only the explicit launch button starts the game');
+  // The clicked state stays visible while saving, then rolls back on failure.
+  error=Error('Game is running');pendingInput.checked=false;pendingInput.indeterminate=false;
+  const enableAction=ui.setModEnabled;let attempted;
+  ui.setModEnabled=(id,enabled,input)=>attempted=enableAction(id,enabled,input);changeHandler({target:pendingInput});
+  assert.equal(pendingInput.checked,false);assert.equal(pendingInput.indeterminate,false);
+  await attempted;assert.equal(messages.at(-1),'Game is running');
+  assert.equal(pendingInput.checked,true);assert.equal(pendingInput.indeterminate,true);assert.equal(fixture.mods[0].approval_required,true);
+  ui.setModEnabled=enableAction;
+  error=null;
+  await execute('setModEnabled("steam",false)');assert.doesNotMatch(node('mod-list').innerHTML,/data-approval-pending|data-workshop-approve/);
+  fixture.mods[0].enabled=true;fixture.mods[0].status='Approved';execute('renderMods()');assert.doesNotMatch(node('mod-list').innerHTML,/data-approval-pending/);
+  Object.assign(fixture.mods[0],{enabled:false,loader_kind:'workshop',trust_state:'yes',status:'Approved · deploys on next launch'});
+  execute('renderMods()');
+  assert.match(node('mod-list').innerHTML, /data-toggle="steam" checked/,'a remembered approval stays selected while the loader restores its deleted mirror');
+  assert.doesNotMatch(node('mod-list').innerHTML,/data-approval-pending|data-workshop-approve/);
+  node('state-filter').value='disabled';execute('renderMods()');assert.equal(node('list-count').textContent,1);
+  node('state-filter').value='enabled';execute('renderMods()');assert.equal(node('list-count').textContent,2);
+  node('state-filter').value='';
+  const approvedInput={checked:true,indeterminate:false,dataset:{toggle:'steam'}};
+  completeSave=true;const enabling=ui.setModEnabled('steam',true,approvedInput);
+  assert.equal(approvedInput.checked,true,'the enable click stays ticked before the request completes');
+  completeSave();completeSave=null;await enabling;
+  error=Error('Cannot save');approvedInput.checked=true;
+  await ui.setModEnabled('steam',true,approvedInput);
+  assert.equal(approvedInput.checked,false,'a failed enable restores the old disabled checkbox');
+  error=null;ui.working=true;approvedInput.checked=true;
+  const beforeCalls=calls.length;await ui.setModEnabled('steam',true,approvedInput);
+  assert.equal(approvedInput.checked,false);assert.equal(calls.length,beforeCalls,'a busy app does not submit an unsaved checkbox change');
+  assert.match(fs.readFileSync(path.join(__dirname,'web/style.css'),'utf8'),/:indeterminate::after[^}]*height:0[^}]*transform:none/,'custom checkboxes render a dash for pending approval');
 }
 
 function libraryConflictChecks(){
@@ -389,7 +449,7 @@ async function nexusBrowserChecks() {
 
 async function profileChecks() {
   const inputs=new Map(),calls=[],messages=[],timers=new Map();let review,click,zipOpened=0,imported=false,downloadState='waiting',jobs=[],nextTimer=0,saveError;
-  const node=id=>{if(!inputs.has(id)){let value='';inputs.set(id,{get value(){return value;},set value(next){value=String(next);},checked:false,classList:{toggle(){}},events:new Map(),addEventListener(event,callback){this.events.set(event,callback);},querySelector(selector){return node(id+' '+selector);},focus(){this.focused=true;},scrollIntoView(){},close(){this.closeCount=(this.closeCount || 0)+1;}});}return inputs.get(id);};
+  const node=id=>{if(!inputs.has(id)){let value='';inputs.set(id,{get value(){return value;},set value(next){value=String(next);},checked:false,classList:{toggle(){}},events:new Map(),addEventListener(event,callback){this.events.set(event,callback);},querySelector(selector){return node(id+' '+selector);},querySelectorAll(){return [];},focus(){this.focused=true;},scrollIntoView(){},close(){this.closeCount=(this.closeCount || 0)+1;}});}return inputs.get(id);};
   const setup={profiles:[{id:'p1',name:'Cozy <set>',mod_count:4,enabled_count:3,active:true}],active_profile:'p1',mods:[
     {id:'nexus-copy',name:'Quick <Stash>',nexus_mod_id:12,enabled:true,can_uninstall:true},
     {id:'steam-copy',name:'Steam copy',workshop_id:'123',enabled:true}],
@@ -788,6 +848,7 @@ async function uninstallChecks() {
 
 async function main() {
   modSourceChecks();
+  await workshopReenableChecks();
   libraryConflictChecks();
   await workshopRefreshChecks();
   await desktopBridgeChecks();
@@ -1015,7 +1076,7 @@ async function main() {
   assert.equal($('deck-preview').disabled, false);
   assert.equal($('deck-proton-setup').disabled, true,'installation waits for a verified comparison and known incomplete loading status');
   assert.match($('deck-connect').innerHTML,/<strong>Reconnect<\/strong><span>Deck connected · game folders found<\/span>/,'the top Connect card contains both action and connection progress');
-  assert.match($('deck-preview').innerHTML,/<strong>Compare<\/strong><span>Verify game versions and review mod files<\/span>/);
+  assert.match($('deck-preview').innerHTML,/<strong>Compare<\/strong><span>Verify game versions and review selected files<\/span>/);
   assert.match($('deck-proton-setup').innerHTML,/Unlocks after a matching comparison/);
   const beforeSetup = requests.length;
   $('deck-workshop_path').value = '';

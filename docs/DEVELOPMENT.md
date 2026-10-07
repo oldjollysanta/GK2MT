@@ -33,7 +33,7 @@ The application is split across:
 | Native bridge and operations | `desktop.py`, `app.py` |
 | Inventory, package deployment, profiles | `inventory.py`, `manager.py`, `profiles.py` |
 | Nexus, Workshop, credentials, download panel | `integrations.py`, `nexus_credentials.py`, `nexus_panel.py` |
-| Deck connection, comparison, and Proton setup | `deck_ssh.py`, `deck.py`, `deck_discovery.py`, `deck_proton.py` |
+| Deck connection, comparison, Proton setup, and game preferences | `deck_ssh.py`, `deck.py`, `deck_discovery.py`, `deck_proton.py`, `deck_game_settings.py` |
 | Desktop interface | `web/index.html`, `web/app.js`, `web/setup.js`, and stylesheets |
 
 ## Tests
